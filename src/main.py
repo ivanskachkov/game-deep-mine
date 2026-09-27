@@ -24,8 +24,10 @@ from game.numfmt import fmt, fmt_duration
 log = logging.getLogger("mine")
 
 SAVE_KEY = "bottomless_mine.save"
-TICK = 0.1                 # шаг игрового цикла, с
-PANEL_REFRESH = 0.5        # как часто обновлять магазин, с
+TICK = 0.25                # шаг игрового цикла, с: 4 кадра/с хватает счётчикам, тапы рисуются сразу
+TICK_IDLE = 1.0            # никто не трогает экран — перерисовываем раз в секунду, бережём батарею
+IDLE_AFTER = 5.0           # через сколько секунд без касаний считаем, что игрок просто смотрит
+PANEL_REFRESH = 1.0        # как часто обновлять магазин (только открытую вкладку), с
 AUTOSAVE_EVERY = 10.0
 OFFLINE_GAP = 5.0          # цикл «проспал» дольше → iOS усыплял приложение, считаем это офлайном
 MIN_OFFLINE_REPORT = 60.0
@@ -126,6 +128,8 @@ class MineApp:
         self.clipboard = ft.Clipboard()
         self.game = Game()
         self.running = True
+        self.paused = False            # игра свёрнута — цикл спит
+        self.last_input = time.monotonic()
         self.tab = 0
         self.buy_mode = 1              # 1, 10 или 0 (= максимум)
         self.speed_idx = 0
@@ -138,7 +142,6 @@ class MineApp:
         self.last_save_at = 0.0
         self.tick_ms = 0.0
         self.fail_toast_depth = -1
-        self.last_auto_fx = 0.0
         self.is_mobile = page.platform in (ft.PagePlatform.IOS, ft.PagePlatform.ANDROID) and not page.web
         self._build()
 
@@ -408,7 +411,7 @@ class MineApp:
 
         self.speed_btn_text = label_text("⏩ Время ×1")
         speed_btn = btn(self.speed_btn_text, self.t_speed)
-        self.debug_text = ft.Text("", size=11, color=MUTED, font_family="monospace", selectable=True)
+        self.debug_text = ft.Text("", size=11, color=MUTED)
         run = self.page.run_task
         buttons = [
             btn("+1K 🪙", lambda e: self.t_gold(1e3)),
@@ -469,7 +472,11 @@ class MineApp:
         last = time.monotonic()
         panel_t = save_t = pulse_t = 0.0
         while self.running:
-            await asyncio.sleep(TICK)
+            await asyncio.sleep(TICK if self.active else TICK_IDLE)
+            if self.paused:
+                # игра свёрнута: не считаем и не рисуем; `last` не трогаем,
+                # чтобы при возврате пропущенное время засчиталось как офлайн
+                continue
             now = time.monotonic()
             dt, last = now - last, now
             try:
@@ -480,8 +487,7 @@ class MineApp:
                 else:
                     self.step(dt)
                 self.refresh_hud()
-                self.header.update()
-                self.mine.update()
+                self.page.update(self.header, self.mine)  # одним сообщением
 
                 panel_t += dt
                 if panel_t >= PANEL_REFRESH:
@@ -503,6 +509,14 @@ class MineApp:
                     break
                 log.exception("game loop error")
 
+    def touch(self):
+        """Игрок что-то сделал — снова 4 кадра в секунду."""
+        self.last_input = time.monotonic()
+
+    @property
+    def active(self) -> bool:
+        return time.monotonic() - self.last_input < IDLE_AFTER
+
     def step(self, dt: float):
         g = self.game
         rep = g.tick(dt * SPEEDS[self.speed_idx])
@@ -514,9 +528,8 @@ class MineApp:
         if rep.guardian_failed and self.fail_toast_depth != g.depth:
             self.fail_toast_depth = g.depth  # напоминаем один раз на стража, а не каждые 30 с
             self.toast(f"😈 {E.guardian_at(g.depth).name} устоял — усиль бригаду или тапай быстрее", "#ef4444")
-        if rep.auto_taps and time.monotonic() - self.last_auto_fx > 0.5:
-            self.last_auto_fx = time.monotonic()
-            self.float_text(self.mine_w / 2 + 70, self.mine_h / 2 - 70, "⛏", TEXT, 20)
+        # Автокирку на экране не рисуем: постоянная анимация держит 60 кадров/с и сажает батарею.
+        # Её видно в шапке («⛏2/с») и по тому, как тает HP блока.
         if rep.nugget_spawned:
             self.show_nugget()
         if rep.nugget_expired:
@@ -583,8 +596,14 @@ class MineApp:
         return True
 
     async def on_lifecycle(self, e: ft.AppLifecycleStateChangeEvent):
-        if e.state in (ft.AppLifecycleState.HIDE, ft.AppLifecycleState.PAUSE, ft.AppLifecycleState.INACTIVE):
+        s = ft.AppLifecycleState
+        if e.state in (s.HIDE, s.PAUSE, s.INACTIVE):
             await self.save()
+        # INACTIVE — это ещё не «свернули» (например, открыт пункт управления), игра идёт дальше
+        if e.state in (s.HIDE, s.PAUSE):
+            self.paused = True
+        elif e.state in (s.SHOW, s.RESUME):
+            self.paused = False
 
     def on_close(self, e):
         self.running = False
@@ -592,6 +611,7 @@ class MineApp:
     # ═════════════════════════ ввод ═════════════════════════
 
     async def on_mine_tap(self, e: ft.TapEvent):
+        self.touch()
         g = self.game
         rep = g.tap()
         pos = e.local_position
@@ -626,6 +646,7 @@ class MineApp:
         self.mine_w, self.mine_h = e.width, e.height
 
     def on_nugget(self, e):
+        self.touch()
         rep = self.game.claim_nugget()
         self.nugget.visible = False
         if not rep:
@@ -703,11 +724,13 @@ class MineApp:
         self.float_text(self.mine_w / 2, self.mine_h / 2 - 40, "💥", TEXT, 34)
 
     def after_purchase(self):
+        self.touch()
         self.refresh_hud()
         self.refresh_panel()
         self.page.update()
 
     def select_tab(self, i: int):
+        self.touch()
         self.tab = i
         for k, b in enumerate(self.tab_buttons):
             b.bgcolor = CARD_HI if k == i else None
@@ -717,6 +740,7 @@ class MineApp:
         self.page.update()
 
     def set_buy_mode(self, mode: int):
+        self.touch()
         self.buy_mode = mode
         for m, b in self.mode_buttons.items():
             b.bgcolor = ACCENT if m == mode else CARD_HI
@@ -772,6 +796,7 @@ class MineApp:
     # ═════════════════════════ режим тестировщика ═════════════════════════
 
     def _tester_done(self, msg: str | None = None):
+        self.touch()
         if msg:
             self.toast(f"🧪 {msg}", TESTER)
         self.refresh_all()
@@ -888,7 +913,8 @@ class MineApp:
             self.floaters -= 1
 
     def on_blocks_broken(self, n: int):
-        self.float_text(self.mine_w / 2, self.mine_h / 2 - 90, f"+{n} м", TEXT, 16)
+        if self.active:  # в простое без анимаций — бережём батарею
+            self.float_text(self.mine_w / 2, self.mine_h / 2 - 90, f"+{n} м", TEXT, 16)
         b = E.biome_at(self.game.depth)
         if self.shown_biome is not None and b.name != self.shown_biome:
             self.toast(f"{b.emoji} Новый слой: {b.name}! Золото {mult_str(E.biome_gold_mult(self.game.depth))}", ACCENT)
@@ -1006,18 +1032,34 @@ class MineApp:
         self.speed_chip.visible = self.tester and speed != 1
         self.speed_chip.content.value = f"⏩ ×{speed}"
 
-    def refresh_panel(self):
+    def digger_visible(self, i: int) -> bool:
         g = self.game
-        mode = self.buy_mode
+        prev = g.diggers.get(C.DIGGERS[i - 1].id, 0) if i else 1
+        return i == 0 or prev > 0 or g.diggers.get(C.DIGGERS[i].id, 0) > 0
 
-        # ── кирка и улучшения ──
-        n = mode or max(1, g.pickaxe_max())
+    def refresh_panel(self):
+        """Точки «есть что купить» на вкладках + строки только открытой вкладки."""
+        g = self.game
+        pick_dot = g.pickaxe_cost() <= g.gold or any(
+            g.upgrade_unlocked(u.id) and u.id not in g.upgrades and u.cost <= g.gold for u in C.UPGRADES
+        )
+        crew_dot = any(self.digger_visible(i) and g.digger_cost(d.id) <= g.gold for i, d in enumerate(C.DIGGERS))
+        relic_dot = g.can_prestige() or any(
+            not g.perk_maxed(p.id) and g.perk_price(p.id) <= g.relics for p in C.PERKS
+        )
+        for i, dot in enumerate((pick_dot, crew_dot, relic_dot)):
+            self.tab_dots[i].visible = dot and self.tab != i
+
+        [self.refresh_pick, self.refresh_crew, self.refresh_relics, self.refresh_more][self.tab]()
+
+    def refresh_pick(self):
+        g = self.game
+        n = self.buy_mode or max(1, g.pickaxe_max())
         cost = g.pickaxe_cost(n)
         self.pick_row.title.value = f"Кирка · ур. {g.pickaxe_level}"
         self.pick_row.info.value = f"Тап: {fmt(g.tap_damage())} · крит {g.crit_chance():.0%} ×{int(E.CRIT_MULT)}"
         self.pick_row.set_milestone(g.pickaxe_level, E.PICKAXE_MILESTONE_EVERY, 2, "ур.")
         self.pick_row.btn.set(f"+{n} ур.", fmt(cost), cost <= g.gold)
-        pick_dot = cost <= g.gold
 
         owned = []
         for u in C.UPGRADES:
@@ -1025,7 +1067,6 @@ class MineApp:
             row.view.visible = g.upgrade_unlocked(u.id) and u.id not in g.upgrades
             if row.view.visible:
                 row.btn.set("улучшить", fmt(u.cost), u.cost <= g.gold)
-                pick_dot = pick_dot or u.cost <= g.gold
             if u.id in g.upgrades:
                 owned.append(u.emoji)
         locked = [u for u in C.UPGRADES if not g.upgrade_unlocked(u.id)]
@@ -1034,14 +1075,14 @@ class MineApp:
             self.upg_teaser.content.value = f"🔒 Следующее улучшение откроется на глубине {locked[0].unlock_depth} м"
         self.upg_owned.value = ("Куплено: " + " ".join(owned)) if owned else ""
 
-        # ── бригада ──
-        crew_dot = False
+    def refresh_crew(self):
+        g = self.game
+        mode = self.buy_mode
         teaser = None
         for i, d in enumerate(C.DIGGERS):
             row = self.digger_rows[d.id]
             count = g.diggers.get(d.id, 0)
-            prev = g.diggers.get(C.DIGGERS[i - 1].id, 0) if i else 1
-            row.view.visible = i == 0 or prev > 0 or count > 0
+            row.view.visible = self.digger_visible(i)
             if not row.view.visible:
                 teaser = teaser or C.DIGGERS[i - 1]
                 continue
@@ -1058,22 +1099,9 @@ class MineApp:
             _, factor = E.next_milestone(count)
             row.set_milestone(count, E.MILESTONE_EVERY, factor)
             row.btn.set(f"+{k}", fmt(cost), cost <= g.gold)
-            crew_dot = crew_dot or g.digger_cost(d.id) <= g.gold
         self.crew_teaser.visible = teaser is not None
         if teaser:
             self.crew_teaser.content.value = f"❓ Новый копатель появится, когда наймёшь «{teaser.name}»"
-
-        relic_dot = g.can_prestige() or any(
-            not g.perk_maxed(p.id) and g.perk_price(p.id) <= g.relics for p in C.PERKS
-        )
-        self.tab_dots[0].visible = pick_dot and self.tab != 0
-        self.tab_dots[1].visible = crew_dot and self.tab != 1
-        self.tab_dots[2].visible = relic_dot and self.tab != 2
-
-        if self.tab == 2:
-            self.refresh_relics()
-        if self.tab == 3:
-            self.refresh_more()
 
     def perk_now(self, pid: str) -> str:
         """Текущий суммарный эффект артефакта — одной строкой."""

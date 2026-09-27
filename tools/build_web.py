@@ -37,6 +37,9 @@ CACHE = ROOT / ".cache" / "web"
 PYODIDE_CDN = "https://cdn.jsdelivr.net/pyodide/v{version}/full/{file}"
 FONTS_CDN = "https://fonts.gstatic.com/s/{path}"
 FONT_FAMILIES = ("notocoloremoji", "notosanssymbols", "notosanssymbols2", "notosansmath", "notosans")
+# У CJK-шрифтов берём только «базовые» кусочки (без номера): латиница, кириллица, греческий.
+# Flutter иногда отдаёт кириллицу китайскому шрифту — без этих ~150 КБ она без сети не нарисуется.
+CJK_FAMILIES = ("notosanssc", "notosanstc", "notosanshk", "notosansjp", "notosanskr")
 
 # Flet всегда рисует через CanvasKit (canvaskit/ и canvaskit/chromium/), остальное не грузится.
 UNUSED = [
@@ -132,7 +135,11 @@ def bundle_fonts(out: Path) -> None:
     """Flutter качает шрифты эмодзи по кусочкам; кладём нужные семейства в assets/fonts/."""
     main_js = (out / "main.dart.js").read_text(encoding="utf-8", errors="ignore")
     paths = sorted(set(re.findall(r'"([a-z0-9]+/v\d+/[A-Za-z0-9_-]+(?:\.\d+)?\.(?:woff2|ttf|otf))"', main_js)))
-    paths = [p for p in paths if p.split("/")[0] in FONT_FAMILIES]
+    paths = [
+        p for p in paths
+        if p.split("/")[0] in FONT_FAMILIES
+        or (p.split("/")[0] in CJK_FAMILIES and not re.search(r"\.\d+\.woff2$", p))
+    ]
     for p in paths:
         download(FONTS_CDN.format(path=p), out / "assets" / "fonts" / p)
     log(f"шрифты: {len(paths)} файлов")
@@ -193,6 +200,12 @@ def check_font_coverage(out: Path) -> None:
     emoji_style = emoji_presentation() | TEXT_STYLE_ALLOWED
 
     bad: dict[str, str] = {}
+    # Шрифт, которого нет в сборке (например, "monospace"), Flutter заменит сам — и для кириллицы
+    # выберет китайский. Поэтому font_family в коде игры не используем вовсе.
+    for py in (ROOT / "src").rglob("*.py"):
+        for node in ast.walk(ast.parse(py.read_text(encoding="utf-8"))):
+            if isinstance(node, ast.keyword) and node.arg in ("font_family", "font_family_fallback"):
+                bad.setdefault(f"font_family (строка {node.value.lineno})", f"{py.name}: такого шрифта нет в сборке")
     for file, text in ui_strings():
         for ch in text:
             cp = ord(ch)
@@ -203,7 +216,9 @@ def check_font_coverage(out: Path) -> None:
             elif cp not in emoji_style:
                 bad.setdefault(ch, f"{file}: текстовое начертание — возьми другой эмодзи")
     if bad:
-        listing = "\n".join(f"  {c} U+{ord(c):04X} — {why}" for c, why in bad.items())
+        listing = "\n".join(
+            f"  {c} U+{ord(c):04X} — {why}" if len(c) == 1 else f"  {c} — {why}" for c, why in bad.items()
+        )
         raise SystemExit(f"Символы, которые без сети могут стать квадратиками:\n{listing}")
     log("шрифты покрывают все символы игры")
 
