@@ -1,0 +1,20 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "mine-web",
+      "runtimeExecutable": ".venv/Scripts/python.exe",
+      "runtimeArgs": [
+        "-c",
+        "import os, runpy, sys; os.environ['FLET_FORCE_WEB_SERVER'] = 'true'; os.environ['FLET_SERVER_PORT'] = '8550'; os.environ['MINE_TESTER'] = '1'; os.environ['PYTHONUNBUFFERED'] = '1'; sys.stdout.reconfigure(line_buffering=True); sys.stderr.reconfigure(line_buffering=True); sys.path.insert(0, 'src'); runpy.run_path('src/main.py', run_name='__main__')"
+      ],
+      "port": 8550
+    },
+    {
+      "name": "mine-pwa",
+      "runtimeExecutable": ".venv/Scripts/python.exe",
+      "runtimeArgs": ["-m", "http.server", "8600", "--directory", "dist"],
+      "port": 8600
+    }
+  ]
+}

@@ -1,0 +1,26 @@
+[project]
+name = "bottomless-mine"
+version = "0.1.0"
+description = "Бездонная шахта — idle-кликер про бесконечное копание вглубь"
+requires-python = ">=3.10"
+dependencies = ["flet==1.0.1"]
+
+[project.optional-dependencies]
+dev = ["flet[all]==1.0.1", "pytest>=8"]
+
+[tool.flet]
+org = "com.ivan.petproject"    # bundle id = <org>.<project name>; Sideloadly при необходимости поменяет сам
+product = "Бездонная шахта"
+company = "Bottomless Mine"
+copyright = "2026"
+
+[tool.flet.app]
+path = "src"
+
+[tool.flet.ios]
+# bundle id = <org>.<project name>; для реального устройства нужен свой Team ID
+# team_id = "XXXXXXXXXX"
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+testpaths = ["tests"]

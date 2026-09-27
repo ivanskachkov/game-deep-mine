@@ -1,0 +1,62 @@
+# Тесты + веб-версия на GitHub Pages при каждом пуше в main.
+# Игра: https://<логин>.github.io/<репозиторий>/  → на iPhone «Поделиться → На экран „Домой“».
+# Один раз включи: Settings → Pages → Source: GitHub Actions.
+name: Веб-версия
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+env:
+  PYTHONDONTWRITEBYTECODE: "1"   # чтобы __pycache__ не попал в сборку
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Зависимости
+        run: pip install "flet[all]==1.0.1" pytest
+
+      - name: Тесты
+        run: python -m pytest -q -p no:cacheprovider
+
+      - name: Сборка веб-версии
+        run: >
+          flet publish src/main.py
+          --distpath "$PWD/dist"
+          --base-url "${{ github.event.repository.name }}"
+          --app-name "Бездонная шахта"
+          --app-short-name "Шахта"
+          --app-description "Idle-кликер: копай вниз бесконечно"
+          --pwa-background-color "#0b0d10"
+          --pwa-theme-color "#12151a"
+
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: dist
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4

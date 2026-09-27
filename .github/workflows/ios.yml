@@ -1,0 +1,60 @@
+# Сборка .ipa для iPhone на облачном Mac.
+# Запуск: вкладка Actions → «iOS (.ipa)» → Run workflow, или пуш тега v* (например v0.2.0).
+# Результат — .ipa БЕЗ подписи: ставится через Sideloadly/AltStore, которые подписывают его твоим Apple ID.
+name: iOS (.ipa)
+
+on:
+  workflow_dispatch:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write   # чтобы приложить .ipa к релизу
+
+env:
+  PYTHONDONTWRITEBYTECODE: "1"
+  FLET_CLI_NO_RICH_OUTPUT: "1"
+
+jobs:
+  ipa:
+    runs-on: macos-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Зависимости
+        run: pip install "flet[all]==1.0.1"
+
+      # Без профиля подписи flet собирает с --no-codesign и отдаёт .xcarchive.
+      # --yes: разрешить flet самому скачать нужную версию Flutter.
+      - name: Сборка
+        run: flet build ipa --yes -o build/ipa
+
+      - name: Упаковка .xcarchive → .ipa
+        run: |
+          APP=$(find build/ipa -type d -name "*.app" -path "*Products/Applications*" | head -1)
+          if [ -z "$APP" ]; then
+            echo "Не нашёл .app внутри .xcarchive. Содержимое build/ipa:"
+            find build/ipa -maxdepth 4
+            exit 1
+          fi
+          echo "Нашёл: $APP"
+          mkdir -p out/Payload
+          cp -R "$APP" out/Payload/
+          (cd out && zip -qry ../BottomlessMine.ipa Payload)
+          ls -lh BottomlessMine.ipa
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: BottomlessMine-ipa
+          path: BottomlessMine.ipa
+
+      - name: Приложить к релизу
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: BottomlessMine.ipa
