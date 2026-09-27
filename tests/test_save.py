@@ -2,6 +2,8 @@ import json
 import math
 import random
 
+import pytest
+
 from game import engine as E
 from game.engine import Game
 
@@ -52,6 +54,32 @@ def test_load_tolerates_garbage():
     assert g.upgrades == {"helmet"}
     assert g.achievements == {"tap_1"}
     assert g.stats.taps == 0 and g.stats.crits == 4
+
+
+def test_perks_and_guardian_roundtrip():
+    g = Game(rng=random.Random(1))
+    g.relics = 20
+    g.buy_perk("autotap")
+    g.buy_perk("slayer")
+    g.skip_meters(24)
+    g.tick(7)
+    restored = Game.from_dict(json.loads(json.dumps(g.to_dict())))
+    assert restored.perks == {"autotap": 1, "slayer": 1}
+    assert restored.guardian_left == pytest.approx(g.guardian_left)
+    assert restored.to_dict() == g.to_dict()
+
+
+def test_v1_relics_become_power_levels():
+    """В первой версии каждая реликвия сама давала +10% — переносим это в «Силу предков»."""
+    g = Game.from_dict({"v": 1, "relics": 7})
+    assert g.relics == 0
+    assert g.perks == {"power": 7}
+    assert g.damage_mult() == pytest.approx(1.7)
+
+
+def test_bad_perks_are_ignored_or_capped():
+    g = Game.from_dict({"v": 2, "perks": {"autotap": 99, "time_travel": 3, "eye": -2}})
+    assert g.perks == {"autotap": 10}
 
 
 def test_block_hp_is_clamped_to_block_max():

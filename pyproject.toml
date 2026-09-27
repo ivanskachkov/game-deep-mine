@@ -6,7 +6,7 @@ requires-python = ">=3.10"
 dependencies = ["flet==1.0.1"]
 
 [project.optional-dependencies]
-dev = ["flet[all]==1.0.1", "pytest>=8"]
+dev = ["flet[all]==1.0.1", "pytest>=8", "fonttools", "brotli"]
 
 [tool.flet]
 org = "com.ivan.petproject"    # bundle id = <org>.<project name>; Sideloadly при необходимости поменяет сам

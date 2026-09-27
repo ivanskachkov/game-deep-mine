@@ -12,11 +12,21 @@ from game import engine as E
 from game.engine import Game
 
 TAPS_PER_SEC = 4
+PERK_PLAN = {"autotap": 2, "veterans": 1}  # сначала это, остальное — в «Силу предков»
 
 
 def _value(g: Game) -> float:
     tap = g.tap_damage() * (1 + g.crit_chance() * (E.CRIT_MULT - 1))
-    return (g.dps() + TAPS_PER_SEC * tap) * E.biome_gold_mult(g.depth) * g.effects().gold_mult
+    return (g.total_dps() + TAPS_PER_SEC * tap) * E.biome_gold_mult(g.depth) * g.effects().gold_mult
+
+
+def spend_relics(g: Game) -> None:
+    for pid, level in PERK_PLAN.items():
+        while g.perk(pid) < level and g.buy_perk(pid):
+            pass
+    if all(g.perk(pid) >= level for pid, level in PERK_PLAN.items()):
+        while g.buy_perk("power"):
+            pass
 
 
 def _best_purchase(g: Game):
@@ -51,6 +61,7 @@ def play(minutes: float, relics: int = 0, seed: int = 1) -> tuple[Game, dict[int
     g = Game(rng=random.Random(seed), relics=relics)
     reached: dict[int, float] = {}
     for sec in range(int(minutes * 60)):
+        spend_relics(g)
         for _ in range(TAPS_PER_SEC):
             g.tap()
         g.tick(1.0)
@@ -61,7 +72,7 @@ def play(minutes: float, relics: int = 0, seed: int = 1) -> tuple[Game, dict[int
             if cost > g.gold:
                 break
             buy()
-        for mark in (10, 25, 50, 100, 150):
+        for mark in (10, 25, 50, 75, 100, 125, 150):
             if g.depth >= mark and mark not in reached:
                 reached[mark] = sec / 60
     return g, reached

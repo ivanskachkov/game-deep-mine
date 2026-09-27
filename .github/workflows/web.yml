@@ -1,6 +1,6 @@
 # Тесты + веб-версия на GitHub Pages при каждом пуше в main.
 # Игра: https://<логин>.github.io/<репозиторий>/  → на iPhone «Поделиться → На экран „Домой“».
-# Один раз включи: Settings → Pages → Source: GitHub Actions.
+# После первого запуска работает без интернета. Один раз включи: Settings → Pages → Source: GitHub Actions.
 name: Веб-версия
 
 on:
@@ -31,21 +31,14 @@ jobs:
           python-version: "3.12"
 
       - name: Зависимости
-        run: pip install "flet[all]==1.0.1" pytest
+        run: pip install "flet[all]==1.0.1" pytest fonttools brotli
 
       - name: Тесты
         run: python -m pytest -q -p no:cacheprovider
 
+      # Офлайн-сборка: Python, движок и шрифты лежат рядом с игрой, service worker их кэширует
       - name: Сборка веб-версии
-        run: >
-          flet publish src/main.py
-          --distpath "$PWD/dist"
-          --base-url "${{ github.event.repository.name }}"
-          --app-name "Бездонная шахта"
-          --app-short-name "Шахта"
-          --app-description "Idle-кликер: копай вниз бесконечно"
-          --pwa-background-color "#0b0d10"
-          --pwa-theme-color "#12151a"
+        run: python tools/build_web.py --base-url "${{ github.event.repository.name }}"
 
       - uses: actions/upload-pages-artifact@v3
         with:

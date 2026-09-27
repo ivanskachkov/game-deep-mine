@@ -13,7 +13,7 @@
     {
       "name": "mine-pwa",
       "runtimeExecutable": ".venv/Scripts/python.exe",
-      "runtimeArgs": ["-m", "http.server", "8600", "--directory", "dist"],
+      "runtimeArgs": ["tools/serve_web.py", "8600"],
       "port": 8600
     }
   ]

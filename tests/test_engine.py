@@ -284,11 +284,15 @@ def test_prestige_resets_run_but_keeps_meta(game):
     assert "tap_1" in game.achievements and "prestige_1" in game.achievements
 
 
-def test_relics_boost_damage(game):
-    game.achievements.clear()
+def test_unspent_relics_do_nothing_power_perk_boosts_damage(game):
     game.relics = 10
-    assert game.damage_mult() == pytest.approx(2.0)
-    assert game.tap_damage() == pytest.approx(2.0)
+    assert game.damage_mult() == 1.0
+    for _ in range(10):
+        assert game.buy_perk("power")
+    assert game.relics == 0
+    assert game.achievements == {"perk_1"}  # «Коллекционер» даёт ещё +1%
+    assert game.damage_mult() == pytest.approx(2.0 * 1.01)
+    assert game.tap_damage() == pytest.approx(2.0 * 1.01)
 
 
 def test_first_tap_unlocks_achievement(game):

@@ -137,6 +137,8 @@ class MineApp:
         self.shown_ach = -1
         self.last_save_at = 0.0
         self.tick_ms = 0.0
+        self.fail_toast_depth = -1
+        self.last_auto_fx = 0.0
         self.is_mobile = page.platform in (ft.PagePlatform.IOS, ft.PagePlatform.ANDROID) and not page.web
         self._build()
 
@@ -178,12 +180,18 @@ class MineApp:
                                      bgcolor=alpha("#000000", 0.45), border_radius=5)
         self.hp_text = ft.Text("", size=11, color=alpha(TEXT, 0.75))
         self.next_text = ft.Text("", size=11, color=alpha(TEXT, 0.55))
+        # таймер стража
+        self.timer_bar = ft.ProgressBar(value=1, width=180, bar_height=6, color="#f59e0b",
+                                        bgcolor=alpha("#000000", 0.45), border_radius=3)
+        self.timer_text = ft.Text("", size=12, weight=HEAVY, color="#fbbf24")
+        self.timer_box = ft.Column([self.timer_bar, self.timer_text], spacing=2, tight=True, visible=False,
+                                   horizontal_alignment=ft.CrossAxisAlignment.CENTER)
         self.tap_layer = ft.Container(
             left=0, top=0, right=0, bottom=0, alignment=CENTER,
             bgcolor=alpha("#000000", 0.01),  # чтобы тап ловился по всей площади шахты
             on_tap_down=self.on_mine_tap,
             content=ft.Column(
-                [self.block, ft.Container(height=6), self.hp_bar, self.hp_text, self.next_text],
+                [self.block, ft.Container(height=6), self.hp_bar, self.hp_text, self.timer_box, self.next_text],
                 spacing=3, tight=True, horizontal_alignment=ft.CrossAxisAlignment.CENTER,
                 alignment=ft.MainAxisAlignment.CENTER,
             ),
@@ -240,14 +248,24 @@ class MineApp:
         self.mine = ft.Container(expand=5, content=self.stack)
 
         # ── вкладки ──
+        # вкладки в стиле iOS: иконка над подписью, точка — «есть что купить»
         self.tab_buttons, self.tab_dots = [], []
-        for i, label in enumerate(["⛏ Кирка", "👷 Бригада", "🏆 Прочее"]):
-            dot = ft.Container(width=7, height=7, border_radius=4, bgcolor=ACCENT, visible=False)
+        for i, (icon, label) in enumerate([("⛏", "Кирка"), ("👷", "Бригада"), ("🏺", "Реликвии"), ("🏆", "Прочее")]):
+            dot = ft.Container(width=7, height=7, border_radius=4, bgcolor=ACCENT, visible=False,
+                               right=14, top=6)
             btn = ft.Container(
-                expand=True, height=42, border_radius=12, alignment=CENTER, ink=True,
+                expand=True, height=52, border_radius=12, ink=True,
                 on_click=lambda e, i=i: self.select_tab(i),
-                content=ft.Row([ft.Text(label, size=14, weight=BOLD, color=TEXT), dot], spacing=5,
-                               alignment=ft.MainAxisAlignment.CENTER, tight=True),
+                content=ft.Stack([
+                    ft.Container(
+                        left=0, right=0, top=0, bottom=0, alignment=CENTER,
+                        content=ft.Column(
+                            [ft.Text(icon, size=19), ft.Text(label, size=11, weight=BOLD, color=TEXT)],
+                            spacing=0, tight=True, horizontal_alignment=ft.CrossAxisAlignment.CENTER,
+                        ),
+                    ),
+                    dot,
+                ]),
             )
             self.tab_buttons.append(btn)
             self.tab_dots.append(dot)
@@ -271,7 +289,7 @@ class MineApp:
             ),
         )
 
-        self.lists = [self._build_pick_tab(), self._build_crew_tab(), self._build_more_tab()]
+        self.lists = [self._build_pick_tab(), self._build_crew_tab(), self._build_relic_tab(), self._build_more_tab()]
         self.panel_body = ft.Container(expand=True, content=self.lists[0])
         self.panel = ft.Container(
             expand=6, bgcolor=PANEL,
@@ -313,7 +331,7 @@ class MineApp:
         self.crew_teaser = card(ft.Text("", size=13, color=MUTED), bgcolor=alpha(CARD, 0.5))
         return self._list([*[r.view for r in self.digger_rows.values()], self.crew_teaser])
 
-    def _build_more_tab(self) -> ft.ListView:
+    def _build_relic_tab(self) -> ft.ListView:
         # перерождение
         self.pr_info = ft.Text("", size=13, color=MUTED)
         self.pr_gain = ft.Text("", size=14, weight=BOLD, color=VIOLET)
@@ -328,6 +346,28 @@ class MineApp:
             ft.Row([self.pr_btn.view], alignment=ft.MainAxisAlignment.END),
         ], spacing=8))
 
+        # реликварий
+        self.relic_balance = ft.Text("", size=22, weight=HEAVY, color=VIOLET)
+        self.relic_hint = ft.Text("", size=12, color=MUTED)
+        self.respec_btn = ft.Container(
+            content=ft.Text("🔄 Вернуть реликвии", size=12, weight=BOLD, color=MUTED),
+            padding=ft.Padding.symmetric(horizontal=10, vertical=6), border_radius=8,
+            bgcolor=CARD_HI, on_click=self.ask_respec, ink=True,
+        )
+        balance_card = card(ft.Row([
+            ft.Column([ft.Text("Реликварий", size=15, weight=BOLD, color=TEXT), self.relic_balance, self.relic_hint],
+                      spacing=2, expand=True),
+            self.respec_btn,
+        ], vertical_alignment=ft.CrossAxisAlignment.START), bgcolor=alpha(VIOLET, 0.08))
+
+        self.perk_rows = {}
+        for p in C.PERKS:
+            row = ShopRow(p.emoji, p.name, lambda e, pid=p.id: self.on_buy_perk(pid))
+            row.btn.color = VIOLET
+            self.perk_rows[p.id] = row
+        return self._list([prestige_card, balance_card, *[r.view for r in self.perk_rows.values()]])
+
+    def _build_more_tab(self) -> ft.ListView:
         # статистика
         self.stats_text = ft.Text("", size=13, color=MUTED)
         stats_card = card(ft.Column([ft.Text("📊 Статистика", size=15, weight=BOLD, color=TEXT), self.stats_text], spacing=6))
@@ -347,12 +387,12 @@ class MineApp:
         self.haptics_switch = ft.Switch(label="Вибрация при тапе", value=True, on_change=self.on_haptics_switch)
         self.tester_switch = ft.Switch(label="🧪 Режим тестировщика", value=self.tester, on_change=self.on_tester_switch)
         settings_card = card(ft.Column([
-            ft.Text("⚙️ Настройки", size=15, weight=BOLD, color=TEXT),
+            ft.Text("🔧 Настройки", size=15, weight=BOLD, color=TEXT),
             self.haptics_switch, self.tester_switch,
         ], spacing=4))
 
         self.tester_card = self._build_tester_card()
-        return self._list([prestige_card, self.tester_card, stats_card, ach_card, settings_card])
+        return self._list([self.tester_card, stats_card, ach_card, settings_card])
 
     def _build_tester_card(self) -> ft.Container:
         def label_text(label: str) -> ft.Text:
@@ -378,6 +418,7 @@ class MineApp:
             btn("🪙 ×10", lambda e: self.t_gold(self.game.gold * 9)),
             btn("+10 м", lambda e: self.t_meters(10)),
             btn("+100 м", lambda e: self.t_meters(100)),
+            btn("👹 К стражу", self.t_to_guardian),
             btn("🌟 Самородок", self.t_nugget),
             btn("🔥 Лихорадка", self.t_fever),
             btn("+10 🏺", self.t_relics),
@@ -388,7 +429,7 @@ class MineApp:
             btn("📂 Загрузить", lambda e: run(self.load, True)),
             btn("📋 Копировать сейв", lambda e: run(self.t_copy_save)),
             btn("📥 Вставить сейв", lambda e: run(self.t_paste_save)),
-            btn("🗑 Сброс", self.t_ask_reset),
+            btn("❌ Сброс", self.t_ask_reset),
         ]
         return card(
             ft.Column([
@@ -467,6 +508,15 @@ class MineApp:
         rep = g.tick(dt * SPEEDS[self.speed_idx])
         if rep.broken:
             self.on_blocks_broken(rep.broken)
+        if rep.guardians:
+            self.on_guardians_defeated(rep.guardians, rep.trophies, rep.new_achievements)
+            rep.new_achievements = []
+        if rep.guardian_failed and self.fail_toast_depth != g.depth:
+            self.fail_toast_depth = g.depth  # напоминаем один раз на стража, а не каждые 30 с
+            self.toast(f"😈 {E.guardian_at(g.depth).name} устоял — усиль бригаду или тапай быстрее", "#ef4444")
+        if rep.auto_taps and time.monotonic() - self.last_auto_fx > 0.5:
+            self.last_auto_fx = time.monotonic()
+            self.float_text(self.mine_w / 2 + 70, self.mine_h / 2 - 70, "⛏", TEXT, 20)
         if rep.nugget_spawned:
             self.show_nugget()
         if rep.nugget_expired:
@@ -495,7 +545,7 @@ class MineApp:
         except Exception:
             log.exception("save failed")
             if notify:
-                self.toast("⚠️ Не удалось сохранить")
+                self.toast("❗ Не удалось сохранить")
 
     async def load(self, notify: bool = False):
         try:
@@ -524,6 +574,7 @@ class MineApp:
         self.haptics_on = bool(data.get("haptics", True))
         self.tester = self.tester or bool(data.get("tester", False))
         self.nugget.visible = False
+        self.hint.visible = game.stats.taps < 15
         self.shown_biome = None
         if offline:
             away = time.time() - float(data.get("saved_at", time.time()))
@@ -551,6 +602,9 @@ class MineApp:
             self.float_text(x, y, f"+{fmt(rep.gold)}", GOLD, 20)
         if rep.broken:
             self.on_blocks_broken(rep.broken)
+        if rep.guardians:
+            self.on_guardians_defeated(rep.guardians, rep.trophies, rep.new_achievements)
+            rep.new_achievements = []
         self.buzz("medium_impact" if (rep.crit or rep.broken) else "light_impact")
         if rep.new_achievements:
             self.announce(rep.new_achievements)
@@ -583,7 +637,8 @@ class MineApp:
             self.toast(f"🌟 Самородок! +{fmt(rep.gold)} золота", GOLD)
         else:
             self.float_text(x, y, "🔥 ×7", "#fb923c", 30)
-            self.toast(f"🔥 Золотая лихорадка! Золото ×{int(E.FEVER_MULT)} на {int(E.FEVER_DURATION)} с", "#fb923c")
+            secs = int(self.game.effects().fever_time)
+            self.toast(f"🔥 Золотая лихорадка! Золото ×{int(E.FEVER_MULT)} на {secs} с", "#fb923c")
         if rep.new_achievements:
             self.announce(rep.new_achievements)
         self.refresh_hud()
@@ -608,6 +663,44 @@ class MineApp:
             self.buzz("medium_impact")
             self.toast(f"{C.UPGRADES_BY_ID[uid].emoji} {C.UPGRADES_BY_ID[uid].name} — куплено!")
             self.after_purchase()
+
+    def on_buy_perk(self, pid: str):
+        if self.game.buy_perk(pid):
+            p = C.PERKS_BY_ID[pid]
+            self.buzz("medium_impact")
+            self.toast(f"{p.emoji} {p.name}: ур. {self.game.perk(pid)}", VIOLET)
+            self.after_purchase()
+
+    def ask_respec(self, e):
+        refund = self.game.perks_refund()
+        if not refund:
+            self.toast("Артефактов пока нет — возвращать нечего")
+            self.page.update()
+            return
+
+        def do_respec(e):
+            self.page.pop_dialog()
+            self.game.respec()
+            self.toast(f"🔄 Возвращено {refund} 🏺 — распредели заново", VIOLET)
+            self.after_purchase()
+
+        self.page.show_dialog(ft.AlertDialog(
+            modal=True,
+            title=ft.Text("Вернуть реликвии?"),
+            content=ft.Text(f"Все артефакты обнулятся, а {refund} 🏺 вернутся — можно распределить их по-другому. Бесплатно."),
+            actions=[
+                ft.TextButton(content="Отмена", on_click=lambda e: self.page.pop_dialog()),
+                ft.FilledButton(content="Вернуть", bgcolor=VIOLET, on_click=do_respec),
+            ],
+        ))
+
+    def on_guardians_defeated(self, killed: int, trophies: int, achievements: list = ()):
+        self.buzz("heavy_impact")
+        name = "Страж повержен!" if killed == 1 else f"Стражей повержено: {killed}"
+        extra = f" +{trophies} 🏺 за нового стража" if trophies else ""
+        ach = "".join(f"\n🏆 {a.emoji} {a.name} (+1% урона)" for a in achievements)
+        self.toast(f"💥 {name}{extra}{ach}", "#f87171")
+        self.float_text(self.mine_w / 2, self.mine_h / 2 - 40, "💥", TEXT, 34)
 
     def after_purchase(self):
         self.refresh_hud()
@@ -653,9 +746,10 @@ class MineApp:
             modal=True,
             title=ft.Text("🌀 Новая шахта?"),
             content=ft.Text(
-                f"Ты получишь +{gain} 🏺 реликвий (+{gain * 10}% урона навсегда).\n\n"
+                f"Ты получишь +{gain} 🏺 реликвий — их можно потратить в реликварии на артефакты.\n\n"
                 "Золото, глубина, кирка, бригада и улучшения обнулятся. "
-                "Реликвии, достижения и статистика останутся."
+                "Реликвии, артефакты, достижения и статистика останутся."
+                + (f"\n\nНаследство: начнёшь с {fmt(g.start_gold())} 🪙" if g.start_gold() else "")
             ),
             actions=[
                 ft.TextButton(content="Не сейчас", on_click=lambda e: self.page.pop_dialog()),
@@ -696,9 +790,14 @@ class MineApp:
         self.show_nugget()
         self._tester_done()
 
+    def t_to_guardian(self, e):
+        g = self.game
+        g.skip_meters(E.GUARDIAN_EVERY - 1 - g.depth % E.GUARDIAN_EVERY or E.GUARDIAN_EVERY)
+        self._tester_done(f"Страж: {E.guardian_at(g.depth).name}")
+
     def t_fever(self, e):
-        self.game.fever_until = self.game.time + E.FEVER_DURATION
-        self._tester_done("Лихорадка на 30 с")
+        self.game.fever_until = self.game.time + self.game.effects().fever_time
+        self._tester_done("Лихорадка")
 
     def t_relics(self, e):
         self.game.relics += 10
@@ -789,7 +888,7 @@ class MineApp:
             self.floaters -= 1
 
     def on_blocks_broken(self, n: int):
-        self.float_text(self.mine_w / 2, self.mine_h / 2 - 90, f"⬇ {n} м" if n > 1 else "⬇ 1 м", TEXT, 16)
+        self.float_text(self.mine_w / 2, self.mine_h / 2 - 90, f"+{n} м", TEXT, 16)
         b = E.biome_at(self.game.depth)
         if self.shown_biome is not None and b.name != self.shown_biome:
             self.toast(f"{b.emoji} Новый слой: {b.name}! Золото {mult_str(E.biome_gold_mult(self.game.depth))}", ACCENT)
@@ -834,13 +933,18 @@ class MineApp:
     def show_offline(self, rep: E.OfflineReport, force: bool = False):
         if not force and (rep.seconds < MIN_OFFLINE_REPORT or rep.gold <= 0):
             return
-        eff = int(self.game.effects().offline_eff * 100)
+        fx = self.game.effects()
+        stuck = (
+            f"\n\n😈 Бригада упёрлась в стража «{E.guardian_at(self.game.depth).name}» — "
+            "дальше без тебя не пройти, но золото с него капало."
+            if rep.stuck_at_guardian else ""
+        )
         self.page.show_dialog(ft.AlertDialog(
             title=ft.Text("С возвращением! ⛏"),
             content=ft.Text(
                 f"Пока тебя не было {fmt_duration(rep.seconds)}, бригада накопала "
-                f"{fmt(rep.gold)} 🪙 и прошла {rep.meters} м.\n\n"
-                f"Офлайн-доход: {eff}%, максимум {int(E.OFFLINE_CAP // 3600)} ч."
+                f"{fmt(rep.gold)} 🪙 и прошла {rep.meters} м.{stuck}\n\n"
+                f"Офлайн-доход: {int(fx.offline_eff * 100)}%, максимум {fx.offline_cap / 3600:g} ч."
             ),
             actions=[ft.FilledButton(content="Забрать", on_click=lambda e: self.page.pop_dialog())],
         ))
@@ -854,7 +958,10 @@ class MineApp:
     def refresh_hud(self):
         g = self.game
         self.gold_text.value = fmt(g.gold)
-        self.income_text.value = f"+{fmt(g.income_per_sec())}/с · тап {fmt(g.tap_damage())}"
+        auto = g.effects().autotap
+        self.income_text.value = (
+            f"+{fmt(g.income_per_sec())}/с · тап {fmt(g.tap_damage())}" + (f" · ⛏{auto}/с" if auto else "")
+        )
         self.depth_text.value = f"{g.depth} м"
         b = E.biome_at(g.depth)
         self.biome_text.value = f"{b.emoji} {b.name} · золото {mult_str(E.biome_gold_mult(g.depth))}"
@@ -865,11 +972,25 @@ class MineApp:
                 begin=ft.Alignment.TOP_CENTER, end=ft.Alignment.BOTTOM_CENTER, colors=[b.bg_top, b.bg_bottom]
             )
             self.block.bgcolor = b.block
-            self.block_emoji.value = b.emoji
 
+        guard = E.is_guardian(g.depth)
         vein = E.is_vein(g.depth)
-        self.block.border = ft.Border.all(4 if vein else 3, GOLD if vein else alpha("#000000", 0.35))
-        self.block_label.value = f"✨ ЖИЛА ×{int(E.VEIN_GOLD_MULT)}" if vein else ""
+        if guard:
+            mob = E.guardian_at(g.depth)
+            self.block_emoji.value = mob.emoji
+            self.block.border = ft.Border.all(4, "#ef4444")
+            self.block_label.value = "👹 СТРАЖ"
+            self.block_label.color = "#fca5a5"
+            limit = g.effects().guardian_time
+            self.timer_bar.value = max(0.0, min(1.0, g.guardian_left / limit))
+            self.timer_bar.color = "#ef4444" if g.guardian_left < 10 else "#f59e0b"
+            self.timer_text.value = f"⏳ {max(0.0, g.guardian_left):.0f} с · {mob.name}"
+        else:
+            self.block_emoji.value = b.emoji
+            self.block.border = ft.Border.all(4 if vein else 3, GOLD if vein else alpha("#000000", 0.35))
+            self.block_label.value = f"✨ ЖИЛА ×{int(E.VEIN_GOLD_MULT)}" if vein else ""
+            self.block_label.color = GOLD
+        self.timer_box.visible = guard
         full = E.block_max_hp(g.depth)
         self.hp_bar.value = max(0.0, min(1.0, g.block_hp / full))
         self.hp_text.value = f"{fmt(g.block_hp)} / {fmt(full)} HP"
@@ -942,19 +1063,60 @@ class MineApp:
         if teaser:
             self.crew_teaser.content.value = f"❓ Новый копатель появится, когда наймёшь «{teaser.name}»"
 
+        relic_dot = g.can_prestige() or any(
+            not g.perk_maxed(p.id) and g.perk_price(p.id) <= g.relics for p in C.PERKS
+        )
         self.tab_dots[0].visible = pick_dot and self.tab != 0
         self.tab_dots[1].visible = crew_dot and self.tab != 1
-        self.tab_dots[2].visible = g.can_prestige() and self.tab != 2
+        self.tab_dots[2].visible = relic_dot and self.tab != 2
 
         if self.tab == 2:
+            self.refresh_relics()
+        if self.tab == 3:
             self.refresh_more()
 
-    def refresh_more(self):
+    def perk_now(self, pid: str) -> str:
+        """Текущий суммарный эффект артефакта — одной строкой."""
+        g, lvl = self.game, self.game.perk(pid)
+        return {
+            "power": f"+{lvl * 10}% урона",
+            "autotap": f"{lvl} удар/с",
+            "veterans": f"бригада ×{fmt(E.PERK_VETERANS ** lvl)}",
+            "inherit": f"старт с {fmt(g.start_gold())} 🪙",
+            "eye": f"+{lvl * 3}% крита",
+            "slayer": f"+{lvl * 5} с, урон +{lvl * 25}%",
+            "luck": f"чаще на {lvl * 25}%, +{lvl * 2} с",
+            "blaze": f"+{lvl * 10} с лихорадки",
+            "night": f"+{lvl * 10}% и +{lvl} ч офлайн",
+            "union": f"копатели −{100 - round(E.PERK_UNION ** lvl * 100)}%",
+            "archeo": f"+{lvl * 15}% реликвий",
+        }[pid]
+
+    def refresh_relics(self):
         g = self.game
+        self.relic_balance.value = f"{g.relics} 🏺"
+        self.relic_hint.value = (
+            f"Всего добыто: {g.stats.relics_total} · вложено: {g.perks_refund()}\n"
+            "Реликвии дают стражи (новые) и перерождение"
+        )
+        for p in C.PERKS:
+            row, lvl = self.perk_rows[p.id], g.perk(p.id)
+            row.title.value = f"{p.name} · {lvl}" if lvl else p.name
+            row.info.value = f"{p.desc} за уровень" + (f"\nСейчас: {self.perk_now(p.id)}" if lvl else "")
+            row.ms_row.visible = bool(p.max_level)
+            if p.max_level:
+                row.ms_bar.value = lvl / p.max_level
+                row.ms_text.value = f"ур. {lvl}/{p.max_level}"
+            if g.perk_maxed(p.id):
+                row.btn.set("куплено", "МАКС", False)
+            else:
+                price = g.perk_price(p.id)
+                row.btn.set("улучшить", f"{price} 🏺", price <= g.relics)
+
         gain = g.relics_on_prestige()
         self.pr_info.value = (
-            f"Реликвии: {g.relics} 🏺 (+{g.relics * 10}% урона)\n"
-            f"Рекорд этого забега: {g.max_depth_run} м"
+            f"Рекорд этого забега: {g.max_depth_run} м\n"
+            f"Реликвии за перерождение растут с глубиной рекорда"
         )
         if gain:
             next_depth = E.PRESTIGE_DIVISOR * (gain + 1) ** 0.5
@@ -966,6 +1128,8 @@ class MineApp:
             self.pr_gain.value = f"Откроется на {E.PRESTIGE_MIN_DEPTH} м (осталось {left} м)"
             self.pr_btn.set("недоступно", f"{E.PRESTIGE_MIN_DEPTH} м", False)
 
+    def refresh_more(self):
+        g = self.game
         s = g.stats
         self.stats_text.value = "\n".join([
             f"Рекорд глубины: {s.max_depth} м",
@@ -973,6 +1137,8 @@ class MineApp:
             f"Тапов: {fmt(s.taps)} · критов: {fmt(s.crits)}",
             f"Блоков: {fmt(s.blocks)} · жил: {fmt(s.veins)}",
             f"Самородков: {s.nuggets} · перерождений: {s.prestiges}",
+            f"Стражей повержено: {s.guardians} · устояли: {s.guardians_failed}",
+            f"Реликвий добыто: {s.relics_total}",
             f"Время в игре: {fmt_duration(s.play_time)}",
             f"Урон бригады: {fmt(g.dps())}/с · множитель урона ×{g.damage_mult():.2f}",
         ])
