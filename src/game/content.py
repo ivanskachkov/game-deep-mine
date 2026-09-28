@@ -118,27 +118,16 @@ UPGRADES_BY_ID = {u.id: u for u in UPGRADES}
 BIOMES: list[Biome] = [
     Biome(0, "Дёрн", "🌱", "#1f160e", "#3d2a18", "#6b4a2e"),
     Biome(25, "Глина", "🧱", "#2a160e", "#5c2f1c", "#9a5a3a"),
-    Biome(60, "Камень", "🪨", "#15181c", "#343b44", "#6b7580"),
-    Biome(100, "Угольный пласт", "⚫", "#0a0a0c", "#1f2125", "#3a3d42"),
-    Biome(150, "Железная руда", "🔩", "#1f1512", "#4a2f27", "#8c5a48"),
-    Biome(210, "Золотая жила", "🪙", "#1f1807", "#4d3d0f", "#b8912a"),
-    Biome(280, "Кристальный грот", "💎", "#120a24", "#2f1a5c", "#7b4fd0"),
-    Biome(360, "Магма", "🔥", "#1f0703", "#5c1608", "#c2410c"),
-    Biome(450, "Мантия", "🌋", "#170810", "#420f2a", "#9d174d"),
-    Biome(550, "Ядро Земли", "🌞", "#211400", "#6b4100", "#f59e0b"),
+    Biome(50, "Камень", "🪨", "#15181c", "#343b44", "#6b7580"),
+    Biome(75, "Угольный пласт", "⚫", "#0a0a0c", "#1f2125", "#3a3d42"),
+    Biome(100, "Железная руда", "🔩", "#1f1512", "#4a2f27", "#8c5a48"),
+    Biome(125, "Золотая жила", "🪙", "#1f1807", "#4d3d0f", "#b8912a"),
+    Biome(150, "Кристальный грот", "💎", "#120a24", "#2f1a5c", "#7b4fd0"),
+    Biome(175, "Магма", "🔥", "#1f0703", "#5c1608", "#c2410c"),
+    Biome(200, "Мантия", "🌋", "#170810", "#420f2a", "#9d174d"),
+    Biome(225, "Ядро Земли", "🌞", "#211400", "#6b4100", "#f59e0b"),
 ]
-# После ядра — бесконечная Бездна: новый слой каждые ABYSS_STEP метров.
-ABYSS_START = 660
-ABYSS_STEP = 120
-ABYSS_PALETTES = [
-    ("#050510", "#101035", "#3b3bb3"),
-    ("#050f0d", "#0f3530", "#14b8a6"),
-    ("#10050f", "#351035", "#c026d3"),
-    ("#0f0f05", "#35350f", "#a3a31a"),
-]
-ROMAN = ["I", "II", "III", "IV", "V", "VI", "VII", "VIII", "IX", "X"]
-
-# Страж каждого слоя (по порядку BIOMES), в Бездне — ABYSS_GUARDIAN.
+# Шахта — 10 слоёв по 25 м, в конце каждого свой страж. Дракон на 249-м метре охраняет дно.
 GUARDIANS: list[Guardian] = [
     Guardian("Жирный червь", "🐛"),
     Guardian("Глиняная жаба", "🐸"),
@@ -151,7 +140,6 @@ GUARDIANS: list[Guardian] = [
     Guardian("Мантийный спрут", "🐙"),
     Guardian("Ядерный дракон", "🐉"),
 ]
-ABYSS_GUARDIAN = Guardian("Тварь Бездны", "👾")
 
 PERKS: list[Perk] = [
     Perk("power", "Сила предков", "💪", "+10% ко всему урону", 1, 1.0),
@@ -169,6 +157,9 @@ PERKS: list[Perk] = [
 PERKS_BY_ID = {p.id: p for p in PERKS}
 
 
+DIGGER_CAP = 500               # больше 500 одного вида нанять нельзя
+
+
 def _total_diggers(g) -> int:
     return sum(g.diggers.values())
 
@@ -180,15 +171,20 @@ ACHIEVEMENTS: list[Achievement] = [
     Achievement("depth_10", "Под землёй", "👇", "Глубина 10 м", lambda g: g.stats.max_depth >= 10),
     Achievement("depth_50", "Глубже!", "🔽", "Глубина 50 м", lambda g: g.stats.max_depth >= 50),
     Achievement("depth_100", "Сотня", "💯", "Глубина 100 м", lambda g: g.stats.max_depth >= 100),
-    Achievement("depth_250", "Где-то тут было золото", "🪙", "Глубина 250 м", lambda g: g.stats.max_depth >= 250),
-    Achievement("depth_500", "Жарковато", "🥵", "Глубина 500 м", lambda g: g.stats.max_depth >= 500),
-    Achievement("depth_1000", "Километр вниз", "🌌", "Глубина 1 000 м", lambda g: g.stats.max_depth >= 1000),
+    Achievement("depth_gold", "Где-то тут было золото", "🪙", "Дойти до золотой жилы (125 м)",
+                lambda g: g.stats.max_depth >= 125),
+    Achievement("depth_magma", "Жарковато", "🥵", "Дойти до магмы (175 м)", lambda g: g.stats.max_depth >= 175),
+    Achievement("bottom", "Дно", "🏁", "Добраться до дна шахты (250 м)", lambda g: g.stats.max_depth >= 250),
     Achievement("gold_1m", "Миллионер", "💰", "Заработать 1M золота за всё время", lambda g: g.stats.gold_total >= 1e6),
     Achievement("gold_1b", "Миллиардер", "🏦", "Заработать 1B золота", lambda g: g.stats.gold_total >= 1e9),
     Achievement("gold_1t", "Триллионер", "👑", "Заработать 1T золота", lambda g: g.stats.gold_total >= 1e12),
     Achievement("hire_10", "Бригадир", "📋", "10 копателей одновременно", lambda g: _total_diggers(g) >= 10),
     Achievement("hire_100", "Прораб", "👷", "100 копателей", lambda g: _total_diggers(g) >= 100),
     Achievement("hire_500", "Олигарх недр", "🎩", "500 копателей", lambda g: _total_diggers(g) >= 500),
+    Achievement("max_1", "Мастер", "🥇", "Докачать копателя до 500",
+                lambda g: any(n >= DIGGER_CAP for n in g.diggers.values())),
+    Achievement("max_all", "Легенда шахты", "🎇", "Все копатели по 500",
+                lambda g: all(g.diggers.get(d.id, 0) >= DIGGER_CAP for d in DIGGERS)),
     Achievement("all_types", "Полный штат", "🧑‍🤝‍🧑", "Нанять каждого копателя хотя бы раз",
                 lambda g: all(g.diggers.get(d.id, 0) > 0 for d in DIGGERS)),
     Achievement("crit_100", "Точно в трещину", "🎯", "100 критических ударов", lambda g: g.stats.crits >= 100),

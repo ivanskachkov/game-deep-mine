@@ -34,18 +34,22 @@ def _best_purchase(g: Game):
     options = []
     for d in C.DIGGERS:
         n = g.diggers.get(d.id, 0)
-        to_milestone = E.next_milestone(n)[0] - n
-        # как живой игрок: либо один копатель, либо докупить до следующего порога
+        if g.digger_maxed(d.id):
+            continue
+        step = E.next_milestone(n)
+        to_milestone = (step[0] if step else E.DIGGER_CAP) - n
+        # как живой игрок: либо один копатель, либо докупить до следующей ступени
         for k in {1, to_milestone}:
             g.diggers[d.id] = n + k
             gain = _value(g) - base
             g.diggers[d.id] = n
             cost = g.digger_cost(d.id, k)
             options.append((gain / cost, cost, lambda d=d, k=k: g.buy_digger(d.id, k)))
-    g.pickaxe_level += 1
-    gain = _value(g) - base
-    g.pickaxe_level -= 1
-    options.append((gain / g.pickaxe_cost(), g.pickaxe_cost(), g.buy_pickaxe))
+    if g.pickaxe_level < E.PICKAXE_CAP:
+        g.pickaxe_level += 1
+        gain = _value(g) - base
+        g.pickaxe_level -= 1
+        options.append((gain / g.pickaxe_cost(), g.pickaxe_cost(), g.buy_pickaxe))
     for u in C.UPGRADES:
         if u.id in g.upgrades or not g.upgrade_unlocked(u.id):
             continue
@@ -53,6 +57,8 @@ def _best_purchase(g: Game):
         gain = _value(g) - base
         g.upgrades.discard(u.id)
         options.append((gain / u.cost, u.cost, lambda u=u: g.buy_upgrade(u.id)))
+    if not options:  # всё докачано
+        return 0.0, float("inf"), lambda: None
     return max(options, key=lambda o: o[0])
 
 
@@ -89,11 +95,64 @@ def test_early_game_is_snappy(first_run):
     assert reached[50] < 5
 
 
-def test_first_prestige_takes_a_while_but_is_reachable(first_run):
+def test_first_run_pacing(first_run):
     g, reached = first_run
-    assert 8 <= reached[100] <= 30, reached
-    assert 150 not in reached, "за полчаса 150 м — слишком быстро"
+    assert 3 <= reached[100] <= 15, reached
+    assert g.stats.max_depth < 225, "за полчаса предпоследний слой — слишком быстро"
     assert g.can_prestige()
+
+
+@pytest.fixture(scope="module")
+def full_game():
+    """Вся игра: бот перерождается, когда упёрся на 10 минут, и играет, пока не дойдёт до дна
+    и не докачает всех до максимума (или не выйдет время)."""
+    g = Game(rng=random.Random(1))
+    step, t, last_progress, best = 2, 0, 0, 0
+    bottom_at, maxed = None, {}  # id → на каком часу впервые докачан
+    while t < 7 * 3600 and not (bottom_at and len(maxed) == len(C.DIGGERS) + 1):
+        spend_relics(g)
+        for _ in range(TAPS_PER_SEC * step):
+            g.tap()
+        g.tick(step)
+        t += step
+        if g.nugget_active:
+            g.claim_nugget()
+        while True:
+            _, cost, buy = _best_purchase(g)
+            if cost > g.gold:
+                break
+            buy()
+        for did in [d.id for d in C.DIGGERS if g.digger_maxed(d.id)] + ["pickaxe"] * (g.pickaxe_level >= E.PICKAXE_CAP):
+            maxed.setdefault(did, t / 3600)
+        if g.at_bottom and bottom_at is None:
+            bottom_at = t / 3600
+        if g.depth > best:
+            best, last_progress = g.depth, t
+        if not g.at_bottom and g.can_prestige() and t - last_progress > 600 and g.relics_on_prestige() >= 8:
+            g.prestige()
+            best, last_progress = 0, t
+    return g, bottom_at, maxed
+
+
+def test_bottom_is_reachable_in_a_few_hours(full_game):
+    g, bottom_at, _ = full_game
+    assert bottom_at is not None, f"до дна не дошли, рекорд {g.stats.max_depth} м"
+    assert 1.5 <= bottom_at <= 5, bottom_at
+    assert g.stats.prestiges >= 2, "дно без перерождений — слишком просто"
+
+
+def test_every_digger_and_pickaxe_reach_the_cap(full_game):
+    _, _, maxed = full_game
+    missing = ({d.id for d in C.DIGGERS} | {"pickaxe"}) - set(maxed)
+    assert not missing, missing
+
+
+def test_cheap_diggers_max_out_first(full_game):
+    """Сначала до 500 доходят дешёвые копатели, дорогие — ближе к финалу."""
+    _, _, maxed = full_game
+    cheap = [maxed[d.id] for d in C.DIGGERS[:3]]
+    pricey = [maxed[d.id] for d in C.DIGGERS[-3:]]
+    assert max(cheap) < min(pricey), maxed
 
 
 def test_relics_speed_up_next_run():
@@ -113,14 +172,8 @@ def hour_run():
     return play(minutes=60)[0]
 
 
-def test_weak_crews_pull_their_weight(hour_run):
-    """Растущие пороги держат в деле и дешёвых копателей (при ×2 за 25 шт. их было 5)."""
-    shares = _dps_shares(hour_run)
-    assert sum(s >= 0.01 for s in shares.values()) >= 7, shares
-
-
 def test_expensive_crews_still_matter(hour_run):
-    """…но пороги не настолько сильны, чтобы дорогие копатели стали бесполезны."""
+    """Через час главный вклад — у самых дорогих из нанятых копателей."""
     shares = _dps_shares(hour_run)
     owned = [d.id for d in C.DIGGERS if hour_run.diggers.get(d.id)]
     top = max(shares, key=shares.get)

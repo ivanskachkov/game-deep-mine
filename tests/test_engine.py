@@ -26,22 +26,56 @@ def test_block_hp_does_not_overflow_at_absurd_depth():
     assert math.isfinite(hp) and hp > 0
 
 
-def test_biome_boundaries_and_endless_abyss():
+def test_ten_layers_of_25_meters():
+    assert [b.start for b in C.BIOMES] == list(range(0, E.MINE_DEPTH, E.LAYER_DEPTH))
+    assert len(C.GUARDIANS) == len(C.BIOMES)
     for b in C.BIOMES:
         assert E.biome_at(b.start).name == b.name
         if b.start > 0:
             assert E.biome_at(b.start - 1).name != b.name
-    assert E.biome_at(C.ABYSS_START).name == "Бездна I"
-    assert E.biome_at(C.ABYSS_START + C.ABYSS_STEP).name == "Бездна II"
-    assert E.biome_at(C.ABYSS_START + 50 * C.ABYSS_STEP).name == "Бездна 51"
-    # каждый следующий биом платит больше
+    # каждый следующий слой платит больше
     assert E.biome_gold_mult(C.BIOMES[1].start) > E.biome_gold_mult(0)
 
 
 def test_next_biome_start():
-    assert E.next_biome_start(0) == C.BIOMES[1].start
-    assert E.next_biome_start(C.BIOMES[-1].start) == C.ABYSS_START
-    assert E.next_biome_start(C.ABYSS_START) == C.ABYSS_START + C.ABYSS_STEP
+    assert E.next_biome_start(0) == 25
+    assert E.next_biome_start(C.BIOMES[-1].start) == E.MINE_DEPTH
+
+
+# ───── дно ─────
+
+def test_bottom_stops_digging(game):
+    game.skip_meters(1000)
+    assert game.depth == E.MINE_DEPTH and game.at_bottom
+    assert not E.is_guardian(game.depth) and not E.is_vein(game.depth)
+
+
+def test_damage_on_the_bottom_only_mines_gold(game):
+    game.skip_meters(E.MINE_DEPTH)
+    rep = game.tap()
+    assert game.depth == E.MINE_DEPTH
+    assert rep.broken == 0 and not rep.bottom
+    assert rep.gold == pytest.approx(rep.damage * E.biome_gold_mult(E.MINE_DEPTH))
+
+
+def test_killing_the_dragon_reaches_the_bottom_once(game):
+    game.skip_meters(E.MINE_DEPTH - 1)
+    assert game.at_guardian and E.guardian_at(game.depth).name == "Ядерный дракон"
+    rep = game.tap()
+    assert not rep.bottom
+    game.block_hp = 1  # добиваем
+    rep = game.tap()
+    assert rep.bottom and game.at_bottom
+    assert game.stats.bottoms == 1
+    assert "bottom" in game.achievements
+    assert not game.tap().bottom  # второй раз не сообщаем
+
+
+def test_offline_on_the_bottom_still_pays(game):
+    game.skip_meters(E.MINE_DEPTH)
+    game.diggers["gnome"] = 10
+    rep = game.apply_offline(3600)
+    assert rep.meters == 0 and rep.gold > 0
 
 
 # ───── тапы, урон, золото ─────
@@ -126,7 +160,7 @@ def test_buy_digger(game):
     assert game.buy_digger("hamster")
     assert game.diggers["hamster"] == 1
     assert game.gold == 0
-    assert game.digger_cost("hamster") == pytest.approx(15 * 1.15)
+    assert game.digger_cost("hamster") == pytest.approx(15 * E.DIGGER_COST_GROWTH)
 
 
 def test_buy_max_diggers(game):
@@ -136,30 +170,51 @@ def test_buy_max_diggers(game):
     assert game.digger_cost("hamster") > game.gold
 
 
-@pytest.mark.parametrize("count, factor", [(25, 2), (50, 4), (75, 6), (100, 8), (125, 8), (500, 8)])
-def test_digger_milestones_grow(game, count, factor):
+@pytest.mark.parametrize("count, jump", [(25, 2), (75, 2.5), (175, 5), (425, 5), (500, 1)])
+def test_digger_ladder_steps(game, count, jump):
     game.diggers["hamster"] = count - 1
     before = game.digger_dps_each("hamster")
     game.diggers["hamster"] = count
-    assert game.digger_dps_each("hamster") == pytest.approx(before * factor)
+    assert game.digger_dps_each("hamster") == pytest.approx(before * jump)
 
 
-def test_milestone_totals():
-    assert [E.milestone_mult(n) for n in (0, 24, 25, 50, 75, 100, 125)] == [1, 1, 2, 8, 48, 384, 3072]
+def test_ladder_totals():
+    """Лестница: ×2 на 25 шт., ×5 на 75, ×25 на 175, ×125 на 425 — итоговые множители."""
+    assert [E.milestone_mult(n) for n in (0, 24, 25, 74, 75, 175, 424, 425, 500)] == [1, 1, 2, 2, 5, 25, 25, 125, 125]
     assert E.next_milestone(0) == (25, 2)
-    assert E.next_milestone(60) == (75, 6)
-    assert E.next_milestone(1000) == (1025, 8)
-    assert math.isfinite(E.milestone_mult(100_000))
+    assert E.next_milestone(100) == (175, 25)
+    assert E.next_milestone(425) is None
 
 
-def test_milestones_never_outpace_prices():
-    """Порог должен возвращать меньше, чем выросла цена за эти 25 штук.
+def test_ladder_never_outpaces_prices():
+    """Ступень должна окупать меньше, чем выросла цена за её штуки.
 
-    Иначе каждый следующий копатель окупается лучше предыдущего,
-    и экономика улетает в бесконечность.
+    Иначе каждый следующий копатель выгоднее предыдущего, и экономика улетает в бесконечность.
     """
-    price_growth = E.DIGGER_COST_GROWTH**E.MILESTONE_EVERY  # ≈ ×33
-    assert all(f < price_growth * 0.7 for f in E.MILESTONE_FACTORS)
+    prev_count, prev_mult = 0, 1.0
+    for count, mult in E.MILESTONES:
+        price_growth = E.DIGGER_COST_GROWTH ** (count - prev_count)
+        assert mult / prev_mult < price_growth, (count, mult)
+        prev_count, prev_mult = count, mult
+
+
+def test_digger_cap(game):
+    game.gold = 1e30
+    assert game.digger_max("hamster") == E.DIGGER_CAP
+    assert game.buy_digger("hamster", E.DIGGER_CAP)
+    assert game.digger_maxed("hamster")
+    assert game.digger_cost("hamster") == math.inf
+    assert game.digger_max("hamster") == 0
+    assert not game.buy_digger("hamster")
+    game.check_achievements()
+    assert "max_1" in game.achievements
+
+
+def test_every_digger_can_reach_500_for_sane_money():
+    """При росте 1.03 даже 500 чёрных дыр стоят «всего» ~10²¹ — это реальная цифра к концу игры."""
+    for d in C.DIGGERS:
+        total = E.geometric_cost(d.base_cost, E.DIGGER_COST_GROWTH, 0, E.DIGGER_CAP)
+        assert total < 1e22, d.id
 
 
 def test_pickaxe_levels(game):
@@ -170,6 +225,23 @@ def test_pickaxe_levels(game):
     assert game.buy_pickaxe(3)
     assert game.pickaxe_level == 3
     assert game.tap_damage() == 4 * game.damage_mult()
+
+
+def test_pickaxe_adds_share_of_crew_damage(game):
+    """Кирка не отстаёт от бригады: каждый уровень — +0.5% её урона к тапу."""
+    game.diggers["blackhole"] = 10
+    dps = game.dps()
+    flat = E.pickaxe_base_damage(40) * game.damage_mult()
+    game.pickaxe_level = 40
+    assert game.tap_damage() == pytest.approx(flat + dps * 0.20)
+
+
+def test_pickaxe_cap(game):
+    game.gold = 1e30
+    assert game.pickaxe_max() == E.PICKAXE_CAP
+    assert game.buy_pickaxe(E.PICKAXE_CAP)
+    assert game.pickaxe_cost() == math.inf
+    assert not game.buy_pickaxe()
 
 
 def test_upgrade_locked_until_depth(game):

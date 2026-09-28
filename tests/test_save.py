@@ -82,6 +82,16 @@ def test_bad_perks_are_ignored_or_capped():
     assert g.perks == {"autotap": 10}
 
 
+def test_v2_save_fits_into_the_new_limits():
+    """До потолков: шахта была бесконечной, копатели и кирка — без предела."""
+    g = Game.from_dict({"v": 2, "depth": 400, "max_depth_run": 420, "pickaxe_level": 180,
+                        "diggers": {"hamster": 900, "gnome": 20}, "stats": {"max_depth": 700}})
+    assert g.depth == E.MINE_DEPTH and g.at_bottom
+    assert g.max_depth_run == E.MINE_DEPTH and g.stats.max_depth == E.MINE_DEPTH
+    assert g.pickaxe_level == E.PICKAXE_CAP
+    assert g.diggers == {"hamster": E.DIGGER_CAP, "gnome": 20}
+
+
 def test_block_hp_is_clamped_to_block_max():
     g = Game.from_dict({"depth": 10, "block_hp": 1e30})
     assert g.block_hp == E.block_max_hp(10)

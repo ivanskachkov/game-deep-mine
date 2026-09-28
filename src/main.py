@@ -114,10 +114,9 @@ class ShopRow:
             spacing=12, vertical_alignment=ft.CrossAxisAlignment.CENTER,
         ))
 
-    def set_milestone(self, n: int, every: int, factor: float, unit: str = "шт."):
-        k = n % every
-        self.ms_bar.value = k / every
-        self.ms_text.value = f"ещё ×{fmt(factor)} через {every - k} {unit}"
+    def set_progress(self, value: float, text: str):
+        self.ms_bar.value = max(0.0, min(1.0, value))
+        self.ms_text.value = text
 
 
 class MineApp:
@@ -525,6 +524,8 @@ class MineApp:
         if rep.guardians:
             self.on_guardians_defeated(rep.guardians, rep.trophies, rep.new_achievements)
             rep.new_achievements = []
+        if rep.bottom:
+            self.on_bottom_reached()
         if rep.guardian_failed and self.fail_toast_depth != g.depth:
             self.fail_toast_depth = g.depth  # напоминаем один раз на стража, а не каждые 30 с
             self.toast(f"😈 {E.guardian_at(g.depth).name} устоял — усиль бригаду или тапай быстрее", "#ef4444")
@@ -625,6 +626,8 @@ class MineApp:
         if rep.guardians:
             self.on_guardians_defeated(rep.guardians, rep.trophies, rep.new_achievements)
             rep.new_achievements = []
+        if rep.bottom:
+            self.on_bottom_reached()
         self.buzz("medium_impact" if (rep.crit or rep.broken) else "light_impact")
         if rep.new_achievements:
             self.announce(rep.new_achievements)
@@ -713,6 +716,18 @@ class MineApp:
                 ft.TextButton(content="Отмена", on_click=lambda e: self.page.pop_dialog()),
                 ft.FilledButton(content="Вернуть", bgcolor=VIOLET, on_click=do_respec),
             ],
+        ))
+
+    def on_bottom_reached(self):
+        self.buzz("heavy_impact")
+        self.page.show_dialog(ft.AlertDialog(
+            title=ft.Text("🏁 Дно!"),
+            content=ft.Text(
+                f"Ты пробился через все {len(C.BIOMES)} слоёв и победил дракона — дальше копать некуда.\n\n"
+                "Скоро здесь появится новое. А пока можно докачать бригаду до 500, "
+                "переродиться за реликвии и пройти шахту быстрее."
+            ),
+            actions=[ft.FilledButton(content="Ура!", bgcolor=VIOLET, on_click=lambda e: self.page.pop_dialog())],
         ))
 
     def on_guardians_defeated(self, killed: int, trophies: int, achievements: list = ()):
@@ -817,6 +832,9 @@ class MineApp:
 
     def t_to_guardian(self, e):
         g = self.game
+        if g.at_bottom:
+            self._tester_done("Ты уже на дне — стражей больше нет")
+            return
         g.skip_meters(E.GUARDIAN_EVERY - 1 - g.depth % E.GUARDIAN_EVERY or E.GUARDIAN_EVERY)
         self._tester_done(f"Страж: {E.guardian_at(g.depth).name}")
 
@@ -1001,7 +1019,12 @@ class MineApp:
 
         guard = E.is_guardian(g.depth)
         vein = E.is_vein(g.depth)
-        if guard:
+        if g.at_bottom:
+            self.block_emoji.value = "🏁"
+            self.block.border = ft.Border.all(4, VIOLET)
+            self.block_label.value = "ДНО"
+            self.block_label.color = VIOLET
+        elif guard:
             mob = E.guardian_at(g.depth)
             self.block_emoji.value = mob.emoji
             self.block.border = ft.Border.all(4, "#ef4444")
@@ -1017,11 +1040,17 @@ class MineApp:
             self.block_label.value = f"✨ ЖИЛА ×{int(E.VEIN_GOLD_MULT)}" if vein else ""
             self.block_label.color = GOLD
         self.timer_box.visible = guard
-        full = E.block_max_hp(g.depth)
-        self.hp_bar.value = max(0.0, min(1.0, g.block_hp / full))
-        self.hp_text.value = f"{fmt(g.block_hp)} / {fmt(full)} HP"
-        nxt = E.next_biome_start(g.depth)
-        self.next_text.value = f"до слоя «{E.biome_at(nxt).name}»: {nxt - g.depth} м"
+        self.hp_bar.visible = not g.at_bottom
+        if g.at_bottom:
+            self.hp_text.value = f"Дно шахты · {E.MINE_DEPTH} м"
+            self.next_text.value = "Скоро здесь будет новое ✨"
+        else:
+            full = E.block_max_hp(g.depth)
+            self.hp_bar.value = max(0.0, min(1.0, g.block_hp / full))
+            self.hp_text.value = f"{fmt(g.block_hp)} / {fmt(full)} HP"
+            nxt = E.next_biome_start(g.depth)
+            where = "до дна" if nxt >= E.MINE_DEPTH else f"до слоя «{E.biome_at(nxt).name}»"
+            self.next_text.value = f"{where}: {nxt - g.depth} м"
 
         self.fever_chip.visible = g.fever_active
         if g.fever_active:
@@ -1054,12 +1083,21 @@ class MineApp:
 
     def refresh_pick(self):
         g = self.game
-        n = self.buy_mode or max(1, g.pickaxe_max())
-        cost = g.pickaxe_cost(n)
-        self.pick_row.title.value = f"Кирка · ур. {g.pickaxe_level}"
-        self.pick_row.info.value = f"Тап: {fmt(g.tap_damage())} · крит {g.crit_chance():.0%} ×{int(E.CRIT_MULT)}"
-        self.pick_row.set_milestone(g.pickaxe_level, E.PICKAXE_MILESTONE_EVERY, 2, "ур.")
-        self.pick_row.btn.set(f"+{n} ур.", fmt(cost), cost <= g.gold)
+        lvl, cap = g.pickaxe_level, E.PICKAXE_CAP
+        self.pick_row.title.value = f"Кирка · ур. {lvl}/{cap}"
+        share = E.PICKAXE_DPS_SHARE * lvl * 100
+        self.pick_row.info.value = (
+            f"Тап: {fmt(g.tap_damage())} · +{share:g}% урона бригады · крит {g.crit_chance():.0%} ×{int(E.CRIT_MULT)}"
+        )
+        if lvl >= cap:
+            self.pick_row.set_progress(1, "максимум")
+            self.pick_row.btn.set("кирка", "МАКС", False)
+        else:
+            every = E.PICKAXE_MILESTONE_EVERY
+            self.pick_row.set_progress(lvl % every / every, f"ещё ×2 через {every - lvl % every} ур.")
+            n = min(self.buy_mode, cap - lvl) if self.buy_mode else max(1, g.pickaxe_max())
+            cost = g.pickaxe_cost(n)
+            self.pick_row.btn.set(f"+{n} ур.", fmt(cost), cost <= g.gold)
 
         owned = []
         for u in C.UPGRADES:
@@ -1086,19 +1124,28 @@ class MineApp:
             if not row.view.visible:
                 teaser = teaser or C.DIGGERS[i - 1]
                 continue
-            k = mode or max(1, g.digger_max(d.id))
-            cost = g.digger_cost(d.id, k)
             each = g.digger_dps_each(d.id)
             bonus = E.milestone_mult(count)
-            row.title.value = f"{d.name} · {count}" if count else d.name
+            row.title.value = f"{d.name} · {count}/{E.DIGGER_CAP}"
             row.info.value = (
                 f"{fmt(each)}/с за шт."
                 + (f" · всего {fmt(each * count)}/с" if count else "")
-                + (f" · бонус ×{fmt(bonus)}" if bonus > 1 else "")
+                + (f" · множитель ×{fmt(bonus)}" if bonus > 1 else "")
             )
-            _, factor = E.next_milestone(count)
-            row.set_milestone(count, E.MILESTONE_EVERY, factor)
-            row.btn.set(f"+{k}", fmt(cost), cost <= g.gold)
+            step = E.next_milestone(count)
+            if step:
+                prev = max((c for c, _ in E.MILESTONES if c <= count), default=0)
+                target, total = step
+                row.set_progress((count - prev) / (target - prev), f"×{fmt(total)} через {target - count} шт.")
+            else:
+                row.set_progress(count / E.DIGGER_CAP, "множитель максимальный")
+            if g.digger_maxed(d.id):
+                row.btn.set("бригада", "МАКС", False)
+            else:
+                left = E.DIGGER_CAP - count
+                k = min(mode, left) if mode else max(1, g.digger_max(d.id))
+                cost = g.digger_cost(d.id, k)
+                row.btn.set(f"+{k}", fmt(cost), cost <= g.gold)
         self.crew_teaser.visible = teaser is not None
         if teaser:
             self.crew_teaser.content.value = f"❓ Новый копатель появится, когда наймёшь «{teaser.name}»"
@@ -1165,6 +1212,7 @@ class MineApp:
             f"Тапов: {fmt(s.taps)} · критов: {fmt(s.crits)}",
             f"Блоков: {fmt(s.blocks)} · жил: {fmt(s.veins)}",
             f"Самородков: {s.nuggets} · перерождений: {s.prestiges}",
+            f"Дно достигнуто: {s.bottoms} раз",
             f"Стражей повержено: {s.guardians} · устояли: {s.guardians_failed}",
             f"Реликвий добыто: {s.relics_total}",
             f"Время в игре: {fmt_duration(s.play_time)}",

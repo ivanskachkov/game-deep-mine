@@ -2,9 +2,10 @@
 
 Экономика в двух словах:
   * урон (тапы + бригада) пробивает блоки; каждый блок = 1 метр глубины;
-  * каждая единица урона приносит золото по курсу текущего биома (глубже — дороже);
-  * здоровье блоков растёт экспоненциально, поэтому рано или поздно упираешься в стену;
-  * каждые 25 м — страж: его надо свалить за 30 с, иначе он восстанавливается;
+  * каждая единица урона приносит золото по курсу текущего слоя (глубже — дороже);
+  * шахта — 10 слоёв по 25 м, в конце каждого страж: 30 с на победу, иначе он восстанавливается;
+  * на 250 м дно — дальше копать некуда (там появится новый режим);
+  * копателей каждого вида — не больше 500, множители растут по лестнице ×2/×5/×25/×125;
   * перерождение сбрасывает забег, но даёт реликвии — их тратят на артефакты реликвария.
 """
 
@@ -16,7 +17,10 @@ from dataclasses import asdict, dataclass, field, fields
 
 from . import content as C
 
-SAVE_VERSION = 2
+SAVE_VERSION = 3
+
+MINE_DEPTH = 250              # дно шахты
+LAYER_DEPTH = 25              # 10 слоёв по 25 м
 
 BLOCK_BASE_HP = 5.0
 BLOCK_HP_GROWTH = 1.16
@@ -26,21 +30,26 @@ VEIN_HP_MULT = 2.5
 VEIN_GOLD_MULT = 5.0
 BIOME_GOLD_GROWTH = 1.3
 
-GUARDIAN_EVERY = 25           # страж на каждом 25-м метре
+GUARDIAN_EVERY = LAYER_DEPTH  # страж замыкает каждый слой
 GUARDIAN_HP_MULT = 4.0
 GUARDIAN_TIME = 30.0          # секунд, чтобы его свалить
 GUARDIAN_GOLD_MULT = 3.0
 GUARDIAN_TROPHY = 1           # реликвий за нового (самого глубокого) стража
 
-DIGGER_COST_GROWTH = 1.15
-# Пороги бригады: каждые 25 копателей одного типа умножают их урон.
-# Множители растут от порога к порогу (последний повторяется дальше).
-MILESTONE_EVERY = 25
-MILESTONE_FACTORS = (2, 4, 6, 8)
-MILESTONE_CAP = 1e300
-PICKAXE_MILESTONE_EVERY = 25  # кирка: каждые 25 уровней урон ×2
+# Копатели: пологий рост цены, чтобы 500 штук каждого вида было реально докачать.
+# При росте 1.15 500-й хомяк стоил бы ~10³¹ золота, при 1.03 — 38M.
+DIGGER_COST_GROWTH = 1.03
+DIGGER_CAP = C.DIGGER_CAP     # 500
+# Лестница множителей: (сколько штук, итоговый множитель).
+MILESTONES = ((25, 2.0), (75, 5.0), (175, 25.0), (425, 125.0))
+
+# Кирка: 100 уровней. Базовый урон важен только в начале, дальше кирка сильна тем,
+# что каждый уровень добавляет к тапу 0.5% урона бригады — она не отстаёт никогда.
+PICKAXE_CAP = 100
 PICKAXE_BASE_COST = 10.0
-PICKAXE_COST_GROWTH = 1.16
+PICKAXE_COST_GROWTH = 1.3
+PICKAXE_MILESTONE_EVERY = 25  # базовый урон ×2 каждые 25 уровней
+PICKAXE_DPS_SHARE = 0.005
 
 BASE_CRIT_CHANCE = 0.04
 CRIT_MULT = 5.0
@@ -79,13 +88,13 @@ PERK_ARCHEO = 0.15
 # ───────────────────────── чистые формулы ─────────────────────────
 
 def is_guardian(depth: int) -> bool:
-    """Каждый 25-й метр — страж: 30 секунд на победу, иначе он восстанавливается."""
-    return (depth + 1) % GUARDIAN_EVERY == 0
+    """Последний метр каждого слоя — страж: 30 секунд на победу, иначе он восстанавливается."""
+    return depth < MINE_DEPTH and (depth + 1) % GUARDIAN_EVERY == 0
 
 
 def is_vein(depth: int) -> bool:
     """Каждый 10-й метр — жила: крепче, но золота впятеро больше (если там не страж)."""
-    return (depth + 1) % VEIN_EVERY == 0 and not is_guardian(depth)
+    return depth < MINE_DEPTH and (depth + 1) % VEIN_EVERY == 0 and not is_guardian(depth)
 
 
 def block_max_hp(depth: int) -> float:
@@ -99,20 +108,7 @@ def block_max_hp(depth: int) -> float:
     return hp * VEIN_HP_MULT if is_vein(depth) else hp
 
 
-def guardian_at(depth: int) -> C.Guardian:
-    i = biome_index(depth)
-    return C.GUARDIANS[i] if i < len(C.GUARDIANS) else C.ABYSS_GUARDIAN
-
-
-def perk_cost(perk_id: str, level: int) -> int:
-    """Цена следующего уровня артефакта, если сейчас уровень level."""
-    p = C.PERKS_BY_ID[perk_id]
-    return math.ceil(p.base_cost * p.cost_growth**level)
-
-
 def biome_index(depth: int) -> int:
-    if depth >= C.ABYSS_START:
-        return len(C.BIOMES) + (depth - C.ABYSS_START) // C.ABYSS_STEP
     idx = 0
     for i, b in enumerate(C.BIOMES):
         if depth >= b.start:
@@ -121,24 +117,27 @@ def biome_index(depth: int) -> int:
 
 
 def biome_at(depth: int) -> C.Biome:
-    i = biome_index(depth)
-    if i < len(C.BIOMES):
-        return C.BIOMES[i]
-    k = i - len(C.BIOMES)
-    top, bottom, block = C.ABYSS_PALETTES[k % len(C.ABYSS_PALETTES)]
-    num = C.ROMAN[k] if k < len(C.ROMAN) else str(k + 1)
-    return C.Biome(C.ABYSS_START + k * C.ABYSS_STEP, f"Бездна {num}", "🌑", top, bottom, block)
+    return C.BIOMES[biome_index(depth)]
+
+
+def guardian_at(depth: int) -> C.Guardian:
+    return C.GUARDIANS[biome_index(depth)]
 
 
 def next_biome_start(depth: int) -> int:
+    """Где начинается следующий слой (или дно, если это последний)."""
     i = biome_index(depth) + 1
-    if i < len(C.BIOMES):
-        return C.BIOMES[i].start
-    return C.ABYSS_START + (i - len(C.BIOMES)) * C.ABYSS_STEP
+    return C.BIOMES[i].start if i < len(C.BIOMES) else MINE_DEPTH
 
 
 def biome_gold_mult(depth: int) -> float:
     return BIOME_GOLD_GROWTH ** biome_index(depth)
+
+
+def perk_cost(perk_id: str, level: int) -> int:
+    """Цена следующего уровня артефакта, если сейчас уровень level."""
+    p = C.PERKS_BY_ID[perk_id]
+    return math.ceil(p.base_cost * p.cost_growth**level)
 
 
 def geometric_cost(base: float, growth: float, owned: int, n: int) -> float:
@@ -175,24 +174,21 @@ def pickaxe_base_damage(level: int) -> float:
     return (1 + level) * 2 ** (level // PICKAXE_MILESTONE_EVERY)
 
 
-def milestone_factor(k: int) -> float:
-    """Множитель k-го порога бригады (k = 1 — это 25 шт., k = 2 — 50 шт. …)."""
-    f = MILESTONE_FACTORS
-    return f[k - 1] if k <= len(f) else f[-1]
-
-
 def milestone_mult(n: int) -> float:
-    """Итоговый множитель для n копателей одного типа — произведение пройденных порогов."""
+    """Итоговый множитель для n копателей одного вида по лестнице MILESTONES."""
     m = 1.0
-    for k in range(1, n // MILESTONE_EVERY + 1):
-        m = min(m * milestone_factor(k), MILESTONE_CAP)
+    for count, total in MILESTONES:
+        if n >= count:
+            m = total
     return m
 
 
-def next_milestone(n: int) -> tuple[int, float]:
-    """(сколько штук нужно для следующего порога, его множитель)."""
-    k = n // MILESTONE_EVERY + 1
-    return k * MILESTONE_EVERY, milestone_factor(k)
+def next_milestone(n: int) -> tuple[int, float] | None:
+    """(сколько штук нужно для следующей ступени, итоговый множитель на ней) или None."""
+    for count, total in MILESTONES:
+        if n < count:
+            return count, total
+    return None
 
 
 # ───────────────────────── состояние ─────────────────────────
@@ -212,6 +208,7 @@ class Stats:
     guardians_failed: int = 0
     max_guardian: int = -1       # глубина самого глубокого поверженного стража
     relics_total: int = 0        # реликвий заработано за всё время
+    bottoms: int = 0             # сколько раз добирались до дна
 
 
 @dataclass
@@ -242,6 +239,7 @@ class HitReport:
     guardians: int = 0                # сколько стражей повержено этим ударом
     trophies: int = 0                 # реликвий за новых стражей
     new_achievements: list = field(default_factory=list)
+    bottom: bool = False              # этим ударом добрались до дна
 
 
 @dataclass
@@ -252,6 +250,7 @@ class TickReport:
     guardians: int = 0
     trophies: int = 0
     guardian_failed: bool = False
+    bottom: bool = False
     nugget_spawned: bool = False
     nugget_expired: bool = False
     fever_ended: bool = False
@@ -357,7 +356,8 @@ class Game:
     def tap_damage(self) -> float:
         fx = self.effects()
         base = pickaxe_base_damage(self.pickaxe_level) * fx.tap_mult * self.damage_mult()
-        return base + self.dps() * fx.tap_dps_share
+        # каждый уровень кирки добавляет к тапу долю урона бригады — кирка не отстаёт
+        return base + self.dps() * (fx.tap_dps_share + PICKAXE_DPS_SHARE * self.pickaxe_level)
 
     def crit_chance(self) -> float:
         return min(self.effects().crit_chance, 0.95)
@@ -383,6 +383,10 @@ class Game:
     @property
     def at_guardian(self) -> bool:
         return is_guardian(self.depth)
+
+    @property
+    def at_bottom(self) -> bool:
+        return self.depth >= MINE_DEPTH
 
     def gold_rate(self, depth: int | None = None) -> float:
         """Сколько золота даёт 1 единица урона на этой глубине."""
@@ -420,6 +424,10 @@ class Game:
             self.stats.veins += 1
         self.stats.blocks += 1
         self.depth += 1
+        if self.depth >= MINE_DEPTH:
+            self.depth = MINE_DEPTH
+            if reward:
+                self.stats.bottoms += 1
         self.max_depth_run = max(self.max_depth_run, self.depth)
         self.stats.max_depth = max(self.stats.max_depth, self.depth)
         self.block_hp = block_max_hp(self.depth)
@@ -433,6 +441,9 @@ class Game:
         steps = 0
         fx = self.effects()
         while dmg > 0 and steps < MAX_BLOCKS_PER_HIT:
+            if self.at_bottom:  # на дне копать нечего — урон только добывает золото
+                gold += dmg * self.gold_rate()
+                break
             mult = fx.guardian_dmg if self.at_guardian else 1.0
             if (
                 offline_dps is not None
@@ -461,10 +472,11 @@ class Game:
         dmg = self.tap_damage() * (CRIT_MULT if crit else 1)
         if crit:
             self.stats.crits += 1
-        g0, r0 = self._guardian_counters()
+        g0, r0, was_bottom = *self._guardian_counters(), self.at_bottom
         gold, broken = self._apply_damage(dmg)
         g1, r1 = self._guardian_counters()
-        return HitReport(dmg, gold, broken, crit, g1 - g0, r1 - r0, self.check_achievements())
+        return HitReport(dmg, gold, broken, crit, g1 - g0, r1 - r0, self.check_achievements(),
+                         bottom=self.at_bottom and not was_bottom)
 
     def tick(self, dt: float) -> TickReport:
         rep = TickReport()
@@ -483,10 +495,11 @@ class Game:
             dmg += rep.auto_taps * self.tap_damage() * (1 + self.crit_chance() * (CRIT_MULT - 1))
 
         guardian_before = self.depth if self.at_guardian else None
-        g0, r0 = self._guardian_counters()
+        g0, r0, was_bottom = *self._guardian_counters(), self.at_bottom
         rep.gold, rep.broken = self._apply_damage(dmg)
         g1, r1 = self._guardian_counters()
         rep.guardians, rep.trophies = g1 - g0, r1 - r0
+        rep.bottom = self.at_bottom and not was_bottom
 
         # таймер стража идёт, только если мы стояли на нём и в начале тика
         if self.at_guardian and self.depth == guardian_before:
@@ -544,10 +557,18 @@ class Game:
         return C.DIGGERS_BY_ID[did].base_cost * self.effects().digger_cost_mult
 
     def digger_cost(self, did: str, n: int = 1) -> float:
-        return geometric_cost(self._digger_base_cost(did), DIGGER_COST_GROWTH, self.diggers.get(did, 0), n)
+        owned = self.diggers.get(did, 0)
+        if owned + n > DIGGER_CAP:
+            return math.inf  # больше потолка не продаётся
+        return geometric_cost(self._digger_base_cost(did), DIGGER_COST_GROWTH, owned, n)
 
     def digger_max(self, did: str) -> int:
-        return max_affordable(self._digger_base_cost(did), DIGGER_COST_GROWTH, self.diggers.get(did, 0), self.gold)
+        owned = self.diggers.get(did, 0)
+        can = max_affordable(self._digger_base_cost(did), DIGGER_COST_GROWTH, owned, self.gold)
+        return min(can, DIGGER_CAP - owned)
+
+    def digger_maxed(self, did: str) -> bool:
+        return self.diggers.get(did, 0) >= DIGGER_CAP
 
     def buy_digger(self, did: str, n: int = 1) -> bool:
         cost = self.digger_cost(did, n)
@@ -558,10 +579,13 @@ class Game:
         return True
 
     def pickaxe_cost(self, n: int = 1) -> float:
+        if self.pickaxe_level + n > PICKAXE_CAP:
+            return math.inf
         return geometric_cost(PICKAXE_BASE_COST, PICKAXE_COST_GROWTH, self.pickaxe_level, n)
 
     def pickaxe_max(self) -> int:
-        return max_affordable(PICKAXE_BASE_COST, PICKAXE_COST_GROWTH, self.pickaxe_level, self.gold)
+        can = max_affordable(PICKAXE_BASE_COST, PICKAXE_COST_GROWTH, self.pickaxe_level, self.gold)
+        return min(can, PICKAXE_CAP - self.pickaxe_level)
 
     def buy_pickaxe(self, n: int = 1) -> bool:
         cost = self.pickaxe_cost(n)
@@ -660,6 +684,8 @@ class Game:
     def skip_meters(self, n: int) -> None:
         """Мгновенно пробить n блоков (без золота, стражи не считаются побеждёнными)."""
         for _ in range(max(0, n)):
+            if self.at_bottom:
+                break
             self._break_block(reward=False)
 
     # ── офлайн ──
@@ -720,9 +746,9 @@ class Game:
 
         g = cls(rng=rng or random.Random())
         g.gold = float(num("gold"))
-        g.depth = int(num("depth", 0))
+        g.depth = min(int(num("depth", 0)), MINE_DEPTH)  # v2: шахта была бесконечной
         g.max_depth_run = max(int(num("max_depth_run", 0)), g.depth)
-        g.pickaxe_level = int(num("pickaxe_level", 0))
+        g.pickaxe_level = min(int(num("pickaxe_level", 0)), PICKAXE_CAP)
         g.relics = int(num("relics", 0))
         g.time = float(num("time"))
         g.fever_until = float(num("fever_until"))
@@ -730,7 +756,7 @@ class Game:
         g.next_nugget_at = float(num("next_nugget_at", g.time + FIRST_NUGGET_AT))
         g.autotap_acc = min(float(num("autotap_acc")), 1.0)
 
-        g.diggers = counts("diggers", C.DIGGERS_BY_ID)
+        g.diggers = {k: min(v, DIGGER_CAP) for k, v in counts("diggers", C.DIGGERS_BY_ID).items()}
         g.perks = counts("perks", C.PERKS_BY_ID)
         for pid, lvl in list(g.perks.items()):
             cap = C.PERKS_BY_ID[pid].max_level
@@ -748,7 +774,9 @@ class Game:
                 g.stats.max_guardian = v if ok else default
                 continue
             setattr(g.stats, f.name, type(default)(num(f.name, default, raw_stats)))
-        g.stats.max_depth = max(g.stats.max_depth, g.max_depth_run)
+        g.max_depth_run = min(g.max_depth_run, MINE_DEPTH)
+        g.stats.max_depth = min(max(g.stats.max_depth, g.max_depth_run), MINE_DEPTH)
+        g.stats.max_guardian = min(g.stats.max_guardian, MINE_DEPTH - 1)
 
         # v1: реликвии давали +10% урона сами по себе → переносим их в «Силу предков»
         if int(num("v", 1)) < 2 and g.relics:

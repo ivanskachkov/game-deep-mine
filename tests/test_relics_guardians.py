@@ -19,7 +19,8 @@ def test_guardian_every_25_meters_beats_vein():
     base = E.BLOCK_BASE_HP * E.BLOCK_HP_GROWTH**24
     assert E.block_max_hp(24) == pytest.approx(base * E.GUARDIAN_HP_MULT)
     assert E.guardian_at(24).name == C.GUARDIANS[0].name
-    assert E.guardian_at(C.ABYSS_START + 24) == C.ABYSS_GUARDIAN
+    assert E.guardian_at(249).name == "Ядерный дракон"
+    assert not E.is_guardian(274)  # за дном стражей нет
 
 
 def test_reaching_guardian_starts_timer(game):
