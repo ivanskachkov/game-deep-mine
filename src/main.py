@@ -16,6 +16,7 @@ import time
 
 import flet as ft
 
+from game import battle as B
 from game import content as C
 from game import engine as E
 from game.engine import Game
@@ -25,6 +26,7 @@ log = logging.getLogger("mine")
 
 SAVE_KEY = "bottomless_mine.save"
 TICK = 0.25                # шаг игрового цикла, с: 4 кадра/с хватает счётчикам, тапы рисуются сразу
+TICK_BATTLE = 0.1          # в бою нужна реакция: замах моба длится меньше секунды
 TICK_IDLE = 1.0            # никто не трогает экран — перерисовываем раз в секунду, бережём батарею
 IDLE_AFTER = 5.0           # через сколько секунд без касаний считаем, что игрок просто смотрит
 PANEL_REFRESH = 1.0        # как часто обновлять магазин (только открытую вкладку), с
@@ -33,6 +35,9 @@ OFFLINE_GAP = 5.0          # цикл «проспал» дольше → iOS у
 MIN_OFFLINE_REPORT = 60.0
 MAX_FLOATERS = 14
 SPEEDS = [1, 10, 100]
+MIN_HIT_GAP = 0.04         # тапы чаще 25 в секунду — это уже не палец
+BATTLE_PAUSE_GAP = 1.5     # бой не обновлялся дольше — значит, стоял на паузе (вкладка, сворачивание)
+TAB_BATTLE, TAB_MORE = 3, 4
 
 BG = "#0b0d10"
 PANEL = "#12151a"
@@ -44,6 +49,10 @@ GOLD = "#fbbf24"
 ACCENT = "#f59e0b"
 VIOLET = "#a78bfa"
 TESTER = "#38bdf8"
+SHARD = "#22d3ee"
+DANGER = "#ef4444"
+HEALTH = "#22c55e"
+BLOCK = "#38bdf8"
 
 CENTER = ft.Alignment.CENTER
 BOLD = ft.FontWeight.W_700
@@ -136,7 +145,12 @@ class MineApp:
         self.tester = os.getenv("MINE_TESTER") == "1"
         self.mine_w, self.mine_h = 360.0, 300.0
         self.floaters = 0
+        self.fx_seq = 0
         self.shown_biome = None
+        self.shown_world = None
+        self.arena_on = False          # вместо шахты показана арена похода
+        self.battle_clock = time.monotonic()
+        self.last_hit = 0.0
         self.shown_ach = -1
         self.last_save_at = 0.0
         self.tick_ms = 0.0
@@ -236,13 +250,14 @@ class MineApp:
             animate_opacity=ft.Animation(duration=220, curve=ft.AnimationCurve.EASE_OUT),
         )
         self.toast_seq = 0
+        self._build_arena()
         self.stack = ft.Stack(
             expand=True,
             on_size_change=self.on_mine_size,
             controls=[
-                self.tap_layer,
+                self.tap_layer, self.arena_layer,
                 ft.TransparentPointer(left=0, top=0, right=0, bottom=0, content=self.fx_layer),
-                self.hint, self.fever_chip, self.speed_chip,
+                self.hint, self.fever_chip, self.speed_chip, self.combo_chip, self.shard_chip, self.hero_box,
                 ft.TransparentPointer(left=16, right=16, top=46, content=self.toast_box),
                 self.nugget,
             ],
@@ -252,7 +267,8 @@ class MineApp:
         # ── вкладки ──
         # вкладки в стиле iOS: иконка над подписью, точка — «есть что купить»
         self.tab_buttons, self.tab_dots = [], []
-        for i, (icon, label) in enumerate([("⛏", "Кирка"), ("👷", "Бригада"), ("🏺", "Реликвии"), ("🏆", "Прочее")]):
+        tabs = [("⛏", "Кирка"), ("👷", "Бригада"), ("🏺", "Реликвии"), ("🪓", "Поход"), ("🏆", "Прочее")]
+        for i, (icon, label) in enumerate(tabs):
             dot = ft.Container(width=7, height=7, border_radius=4, bgcolor=ACCENT, visible=False,
                                right=14, top=6)
             btn = ft.Container(
@@ -291,7 +307,8 @@ class MineApp:
             ),
         )
 
-        self.lists = [self._build_pick_tab(), self._build_crew_tab(), self._build_relic_tab(), self._build_more_tab()]
+        self.lists = [self._build_pick_tab(), self._build_crew_tab(), self._build_relic_tab(),
+                      self._build_battle_tab(), self._build_more_tab()]
         self.panel_body = ft.Container(expand=True, content=self.lists[0])
         self.panel = ft.Container(
             expand=6, bgcolor=PANEL,
@@ -302,6 +319,67 @@ class MineApp:
         self.root = ft.SafeArea(
             expand=True,
             content=ft.Column([self.header, self.mine, self.panel], spacing=0, expand=True),
+        )
+
+    def _build_arena(self):
+        """Арена похода: моб по центру, сверху комбо и осколки, снизу здоровье героя и «Блок»."""
+        self.wave_text = ft.Text("", size=13, weight=BOLD, color=alpha(TEXT, 0.85))
+        self.mob_emoji = ft.Text("🦇", size=56)
+        self.mob_label = ft.Text("", size=11, weight=HEAVY, color=GOLD)
+        self.mob_box = ft.Container(
+            width=124, height=124, border_radius=28, alignment=CENTER, bgcolor=alpha("#000000", 0.35),
+            border=ft.Border.all(3, alpha("#ffffff", 0.12)),
+            shadow=ft.BoxShadow(blur_radius=24, color=alpha("#000000", 0.5), offset=ft.Offset(0, 8)),
+            content=ft.Column([self.mob_emoji, self.mob_label], spacing=0, tight=True,
+                              horizontal_alignment=ft.CrossAxisAlignment.CENTER,
+                              alignment=ft.MainAxisAlignment.CENTER),
+            scale=1, animate_scale=ft.Animation(duration=70, curve=ft.AnimationCurve.EASE_OUT),
+        )
+        self.mob_name = ft.Text("", size=13, weight=BOLD, color=TEXT)
+        self.mob_hp_bar = ft.ProgressBar(value=1, width=200, bar_height=10, color=DANGER,
+                                         bgcolor=alpha("#000000", 0.45), border_radius=5)
+        self.mob_hp_text = ft.Text("", size=11, color=alpha(TEXT, 0.75))
+        # полоска «до удара моба»: в замахе краснеет — пора жать блок
+        self.atk_bar = ft.ProgressBar(value=0, width=200, bar_height=6, color=MUTED,
+                                      bgcolor=alpha("#000000", 0.45), border_radius=3)
+        self.atk_text = ft.Text("", size=12, weight=BOLD, color=alpha(TEXT, 0.7))
+        self.arena_layer = ft.Container(
+            left=0, top=0, right=0, bottom=0, alignment=CENTER, visible=False,
+            padding=ft.Padding.only(top=30, bottom=62),
+            bgcolor=alpha("#000000", 0.01), on_tap_down=self.on_arena_tap,
+            content=ft.Column(
+                [self.wave_text, self.mob_box, self.mob_name, self.mob_hp_bar, self.mob_hp_text,
+                 self.atk_bar, self.atk_text],
+                spacing=4, tight=True, horizontal_alignment=ft.CrossAxisAlignment.CENTER,
+                alignment=ft.MainAxisAlignment.CENTER,
+            ),
+        )
+        self.combo_chip = ft.Container(
+            left=12, top=10, visible=False, border_radius=20,
+            padding=ft.Padding.symmetric(horizontal=12, vertical=6),
+            gradient=ft.LinearGradient(colors=["#f97316", "#facc15"]),
+            content=ft.Text("", size=13, weight=HEAVY, color="#2a1400"),
+        )
+        self.shard_chip = ft.Container(
+            right=12, top=10, visible=False, border_radius=20,
+            padding=ft.Padding.symmetric(horizontal=12, vertical=6), bgcolor=alpha(SHARD, 0.18),
+            content=ft.Text("", size=13, weight=HEAVY, color=SHARD),
+        )
+        self.hero_text = ft.Text("", size=12, weight=BOLD, color=TEXT)
+        self.hero_bar = ft.ProgressBar(value=1, bar_height=10, color=HEALTH,
+                                       bgcolor=alpha("#000000", 0.45), border_radius=5)
+        self.block_text = ft.Text("✋ БЛОК", size=15, weight=HEAVY, color=TEXT)
+        self.block_btn = ft.Container(
+            width=128, height=50, border_radius=14, alignment=CENTER, bgcolor=CARD_HI,
+            border=ft.Border.all(2, alpha(BLOCK, 0.5)),
+            content=self.block_text, on_tap_down=self.on_block,
+        )
+        self.hero_box = ft.Container(
+            left=12, right=12, bottom=8, visible=False,
+            content=ft.Row(
+                [ft.Column([self.hero_text, self.hero_bar], spacing=4, expand=True), self.block_btn],
+                spacing=12, vertical_alignment=ft.CrossAxisAlignment.CENTER,
+            ),
         )
 
     def _list(self, controls: list[ft.Control]) -> ft.ListView:
@@ -369,6 +447,67 @@ class MineApp:
             self.perk_rows[p.id] = row
         return self._list([prestige_card, balance_card, *[r.view for r in self.perk_rows.values()]])
 
+    def _build_battle_tab(self) -> ft.ListView:
+        self.battle_lock = card(ft.Text("", size=13, color=MUTED), bgcolor=alpha(CARD, 0.5))
+
+        # мир и волна
+        self.world_title = ft.Text("", size=16, weight=HEAVY, color=TEXT)
+        self.world_info = ft.Text("", size=12, color=MUTED)
+        self.world_chips = [
+            ft.Container(
+                expand=True, height=50, border_radius=10, alignment=CENTER, bgcolor=CARD_HI, ink=True,
+                on_click=lambda e, i=i: self.on_select_world(i),
+                content=ft.Column(
+                    [ft.Text(w.emoji, size=18), ft.Text(w.name, size=10, weight=BOLD, color=TEXT)],
+                    spacing=0, tight=True, horizontal_alignment=ft.CrossAxisAlignment.CENTER,
+                ),
+            )
+            for i, w in enumerate(C.WORLDS)
+        ]
+        self.wave_chips = [
+            ft.Container(
+                expand=True, height=36, border_radius=9, alignment=CENTER, bgcolor=CARD_HI, ink=True,
+                on_click=lambda e, i=i: self.on_select_wave(i),
+                content=ft.Text(str(i + 1), size=13, weight=BOLD, color=TEXT),
+            )
+            for i in range(B.WAVES)
+        ]
+        half = B.WAVES // 2
+        self.world_card = card(ft.Column([
+            self.world_title, self.world_info,
+            ft.Row(self.world_chips, spacing=6),
+            ft.Row(self.wave_chips[:half], spacing=6),
+            ft.Row(self.wave_chips[half:], spacing=6),
+        ], spacing=8))
+
+        # герой
+        self.hero_stats = ft.Text("", size=13, color=MUTED)
+        self.hero_card = card(ft.Column(
+            [ft.Text("🪓 Герой", size=15, weight=BOLD, color=TEXT), self.hero_stats], spacing=6,
+        ), bgcolor=alpha(SHARD, 0.07))
+
+        # снаряжение
+        self.gear_rows = {}
+        for slot in C.GEAR:
+            row = ShopRow(slot.emoji, slot.names[0], lambda e, sid=slot.id: self.on_upgrade_gear(sid))
+            row.btn.color = SHARD
+            self.gear_rows[slot.id] = row
+
+        self.battle_help = card(ft.Text(
+            "Как воевать\n"
+            "• Тапай по мобу: каждый удар подряд сильнее — это комбо.\n"
+            "• Перед ударом моб замахивается. Нажми «Блок» в этот момент — урон срежется, комбо уцелеет.\n"
+            "• Пропустил удар или нажал «Блок» слишком рано — комбо сгорает.\n"
+            "• Здоровье восстанавливается только между волнами. Погиб — волна начинается заново.\n"
+            "• С мобов падают осколки 💠, с десятого моба волны изредка — вещь нового ранга.\n"
+            "• Не хватает сил — вернись на пройденную волну и пофарми осколки.",
+            size=12, color=MUTED,
+        ), bgcolor=alpha(CARD, 0.5))
+        return self._list([
+            self.battle_lock, self.world_card, self.hero_card,
+            *[r.view for r in self.gear_rows.values()], self.battle_help,
+        ])
+
     def _build_more_tab(self) -> ft.ListView:
         # статистика
         self.stats_text = ft.Text("", size=13, color=MUTED)
@@ -424,6 +563,9 @@ class MineApp:
             btn("🌟 Самородок", self.t_nugget),
             btn("🔥 Лихорадка", self.t_fever),
             btn("+10 🏺", self.t_relics),
+            btn("🪓 Открыть поход", self.t_unlock_battle),
+            btn("+1K 💠", lambda e: self.t_shards(1000)),
+            btn("🏁 Пройти волну", self.t_win_wave),
             speed_btn,
             btn("💤 Офлайн 1 ч", lambda e: self.t_offline(3600)),
             btn("💤 Офлайн 8 ч", lambda e: self.t_offline(8 * 3600)),
@@ -471,7 +613,7 @@ class MineApp:
         last = time.monotonic()
         panel_t = save_t = pulse_t = 0.0
         while self.running:
-            await asyncio.sleep(TICK if self.active else TICK_IDLE)
+            await asyncio.sleep(self.tick_interval())
             if self.paused:
                 # игра свёрнута: не считаем и не рисуем; `last` не трогаем,
                 # чтобы при возврате пропущенное время засчиталось как офлайн
@@ -485,6 +627,8 @@ class MineApp:
                     self.refresh_all()
                 else:
                     self.step(dt)
+                    if self.arena_on:
+                        self.on_enemy(self.battle_sync())
                 self.refresh_hud()
                 self.page.update(self.header, self.mine)  # одним сообщением
 
@@ -516,6 +660,13 @@ class MineApp:
     def active(self) -> bool:
         return time.monotonic() - self.last_input < IDLE_AFTER
 
+    def tick_interval(self) -> float:
+        if not self.active:
+            return TICK_IDLE
+        if self.arena_on and not self.game.battle.waiting:
+            return TICK_BATTLE  # идёт бой — нужно вовремя показать замах
+        return TICK
+
     def step(self, dt: float):
         g = self.game
         rep = g.tick(dt * SPEEDS[self.speed_idx])
@@ -532,7 +683,7 @@ class MineApp:
         # Автокирку на экране не рисуем: постоянная анимация держит 60 кадров/с и сажает батарею.
         # Её видно в шапке («⛏2/с») и по тому, как тает HP блока.
         if rep.nugget_spawned:
-            self.show_nugget()
+            self.show_nugget()  # в походе не показывается — там не до самородков
         if rep.nugget_expired:
             self.nugget.visible = False
         if rep.fever_ended:
@@ -588,8 +739,7 @@ class MineApp:
         self.haptics_on = bool(data.get("haptics", True))
         self.tester = self.tester or bool(data.get("tester", False))
         self.nugget.visible = False
-        self.hint.visible = game.stats.taps < 15
-        self.shown_biome = None
+        self.set_arena(False)  # какой экран показывать, решит ближайший refresh_panel
         if offline:
             away = time.time() - float(data.get("saved_at", time.time()))
             if away >= MIN_OFFLINE_REPORT:
@@ -647,6 +797,156 @@ class MineApp:
 
     def on_mine_size(self, e: ft.LayoutSizeChangeEvent):
         self.mine_w, self.mine_h = e.width, e.height
+
+    # ── поход ──
+
+    def battle_sync(self) -> B.EnemyReport:
+        """Прокручивает бой до текущего момента: мобы бьют по своим часам, а не по кадрам."""
+        now = time.monotonic()
+        dt, self.battle_clock = now - self.battle_clock, now
+        if dt > BATTLE_PAUSE_GAP:
+            dt = 0.0
+        return self.game.battle.advance(dt)
+
+    def on_enemy(self, rep: B.EnemyReport):
+        if not (rep.hits or rep.blocked):
+            return
+        x, y = 70.0, self.mine_h - 64  # над полоской здоровья героя
+        if rep.hits:
+            self.float_text(x, y, f"−{fmt(rep.damage)}", DANGER, 22)
+            self.buzz("heavy_impact")
+        else:
+            self.float_text(x, y, f"✋ −{fmt(rep.damage)}", BLOCK, 16)
+            self.buzz("light_impact")
+        if rep.died:
+            self.toast("💀 Герой пал — волна начнётся заново.\nУлучши снаряжение или пофарми волну попроще", DANGER)
+
+    async def on_arena_tap(self, e: ft.TapEvent):
+        self.touch()
+        now = time.monotonic()
+        if now - self.last_hit < MIN_HIT_GAP:
+            return
+        self.last_hit = now
+        enemy = self.battle_sync()  # вдруг моб успел ударить раньше этого тапа
+        self.on_enemy(enemy)
+        if not enemy.died:
+            rep = self.game.battle_hit()
+            pos = e.local_position
+            x, y = (pos.x, pos.y) if pos else (self.mine_w / 2, self.mine_h / 2)
+            maxed = rep.combo >= B.COMBO_CAP
+            self.float_text(x, y, fmt(rep.damage), "#ff7a59" if maxed else TEXT, 24 if maxed else 19)
+            if rep.wave_cleared:
+                self.on_wave_cleared(rep)
+            elif rep.killed:
+                if rep.shards:
+                    self.float_text(self.mine_w / 2, self.mine_h / 2 - 70, f"+{fmt(rep.shards)} 💠", SHARD, 20)
+                if rep.new_achievements:
+                    self.announce(rep.new_achievements)
+            self.buzz("medium_impact" if rep.killed else "light_impact")
+            self.page.run_task(self.bump_mob)
+        self.refresh_hud()
+        self.mine.update()
+
+    async def bump_mob(self):
+        self.mob_box.scale = 0.92
+        self.mob_box.update()
+        await asyncio.sleep(0.07)
+        self.mob_box.scale = 1
+        self.mob_box.update()
+
+    def on_block(self, e):
+        self.touch()
+        self.on_enemy(self.battle_sync())
+        result = self.game.battle.block()
+        if result == "early":
+            self.float_text(self.mine_w - 90, self.mine_h - 64, "Рано! Комбо сбито", MUTED, 14)
+            self.buzz("medium_impact")
+        elif result == "ok":
+            self.buzz("selection_click")
+        self.refresh_hud()
+        self.mine.update()
+
+    def on_wave_cleared(self, rep: B.StrikeReport):
+        lines = [f"🏁 Волна пройдена! +{fmt(rep.shards)} 💠"]
+        if rep.gear:
+            slot, tier = rep.gear
+            lines.append(f"🎁 Выпала вещь: {C.GEAR_BY_ID[slot].names[tier]}!")
+        elif rep.duplicate:
+            lines.append("🎁 Комплект уже собран — вещь рассыпалась на осколки")
+        lines += [f"🏆 {a.emoji} {a.name} (+1% урона)" for a in rep.new_achievements]
+        self.toast("\n".join(lines), SHARD)
+        self.buzz("heavy_impact")
+        if rep.world_cleared:
+            self.on_world_cleared()
+        self.refresh_panel()
+        self.panel.update()
+
+    def on_world_cleared(self):
+        b = self.game.battle
+        done = C.WORLDS[b.cleared // B.WAVES - 1]
+        if b.finished:
+            text = (
+                "Все четыре мира пройдены — сильнее мобов пока нет.\n\n"
+                "Скоро здесь появится новое. А пока последнюю волну можно фармить ради осколков."
+            )
+        else:
+            nxt = C.WORLDS[b.world]
+            text = (
+                f"Открыт мир «{nxt.name}» {nxt.emoji}. Мобы там сильнее и замахиваются быстрее, "
+                f"зато с десятого моба волны падает {nxt.gear} комплект — вдвое сильнее прежнего."
+            )
+        self.page.show_dialog(ft.AlertDialog(
+            title=ft.Text(f"{done.emoji} Мир «{done.name}» пройден!"),
+            content=ft.Text(text),
+            actions=[ft.FilledButton(content="Дальше", bgcolor=SHARD, on_click=lambda e: self.page.pop_dialog())],
+        ))
+
+    def on_select_world(self, i: int):
+        b = self.game.battle
+        first = i * B.WAVES
+        if first > b.frontier:
+            self.toast(f"🔒 Сначала пройди мир «{C.WORLDS[i - 1].name}»")
+        else:
+            # в пройденном мире встаём на последнюю волну, в текущем — на самую дальнюю доступную
+            b.select(min(b.frontier, first + B.WAVES - 1))
+        self.after_purchase()
+
+    def on_select_wave(self, i: int):
+        b = self.game.battle
+        if not b.select(b.world * B.WAVES + i):
+            self.toast("🔒 Сначала пройди предыдущую волну")
+        self.after_purchase()
+
+    def on_upgrade_gear(self, sid: str):
+        b = self.game.battle
+        n = self.buy_mode or b.upgrade_max(sid)
+        if n and self.game.battle_upgrade(sid, n):
+            self.buzz("selection_click")
+            self.after_purchase()
+
+    def set_arena(self, on: bool):
+        """Переключает верхнюю часть экрана между шахтой и ареной похода."""
+        self.arena_on = on
+        self.tap_layer.visible = not on
+        self.arena_layer.visible = on
+        self.shard_chip.visible = on
+        self.hero_box.visible = on
+        self.combo_chip.visible = False
+        self.hint.visible = not on and self.game.stats.taps < 15
+        self.shown_biome = self.shown_world = None  # фон перерисуется при ближайшем обновлении
+        if on:
+            self.fever_chip.visible = False
+            self.nugget.visible = False
+            self.battle_clock = time.monotonic()
+        elif self.game.nugget_active:
+            self.show_nugget()
+
+    def sync_arena(self):
+        """Арена показана, когда открыта вкладка «Поход» и сам поход уже открыт."""
+        want = self.tab == TAB_BATTLE and self.game.battle_unlocked
+        if want != self.arena_on:
+            self.set_arena(want)
+        self.mode_bar.visible = self.tab in (0, 1) or want
 
     def on_nugget(self, e):
         self.touch()
@@ -724,10 +1024,12 @@ class MineApp:
             title=ft.Text("🏁 Дно!"),
             content=ft.Text(
                 f"Ты пробился через все {len(C.BIOMES)} слоёв и победил дракона — дальше копать некуда.\n\n"
-                "Скоро здесь появится новое. А пока можно докачать бригаду до 500, "
-                "переродиться за реликвии и пройти шахту быстрее."
+                "Зато открылся поход 🪓: загляни на новую вкладку. Там мобы, доспехи и осколки, "
+                "а собранные вещи усиливают и шахту.\n\n"
+                "Шахта тем временем работает сама: бригаду можно докачать до 500, "
+                "переродиться за реликвии и пройти её быстрее."
             ),
-            actions=[ft.FilledButton(content="Ура!", bgcolor=VIOLET, on_click=lambda e: self.page.pop_dialog())],
+            actions=[ft.FilledButton(content="В поход!", bgcolor=VIOLET, on_click=lambda e: self.page.pop_dialog())],
         ))
 
     def on_guardians_defeated(self, killed: int, trophies: int, achievements: list = ()):
@@ -736,7 +1038,8 @@ class MineApp:
         extra = f" +{trophies} 🏺 за нового стража" if trophies else ""
         ach = "".join(f"\n🏆 {a.emoji} {a.name} (+1% урона)" for a in achievements)
         self.toast(f"💥 {name}{extra}{ach}", "#f87171")
-        self.float_text(self.mine_w / 2, self.mine_h / 2 - 40, "💥", TEXT, 34)
+        if not self.arena_on:
+            self.float_text(self.mine_w / 2, self.mine_h / 2 - 40, "💥", TEXT, 34)
 
     def after_purchase(self):
         self.touch()
@@ -750,8 +1053,7 @@ class MineApp:
         for k, b in enumerate(self.tab_buttons):
             b.bgcolor = CARD_HI if k == i else None
         self.panel_body.content = self.lists[i]
-        self.mode_bar.visible = i in (0, 1)
-        self.refresh_panel()
+        self.refresh_all()
         self.page.update()
 
     def set_buy_mode(self, mode: int):
@@ -846,6 +1148,28 @@ class MineApp:
         self.game.relics += 10
         self._tester_done("+10 реликвий")
 
+    def t_unlock_battle(self, e):
+        self.game.stats.max_depth = E.MINE_DEPTH
+        self._tester_done("Поход открыт — вкладка «Поход»")
+
+    def t_shards(self, n: int):
+        self.game.battle.shards += n
+        self._tester_done(f"+{n} осколков")
+
+    def t_win_wave(self, e):
+        g = self.game
+        if not g.battle_unlocked:
+            self._tester_done("Сначала открой поход")
+            return
+        while True:
+            g.battle.hero_bonus = 1e30  # достижения по пути пересчитывают бонус — возвращаем
+            rep = g.battle_hit()
+            if rep.wave_cleared:
+                break
+        g.battle.hero_bonus = g.achievement_mult()
+        self.on_wave_cleared(rep)
+        self._tester_done()
+
     def t_speed(self, e):
         self.speed_idx = (self.speed_idx + 1) % len(SPEEDS)
         self._tester_done(f"Скорость времени ×{SPEEDS[self.speed_idx]}")
@@ -909,7 +1233,11 @@ class MineApp:
 
     async def _floater(self, x, y, text, color, size):
         self.floaters += 1
+        self.fx_seq += 1
         f = ft.Container(
+            # ключ обязателен: без него Flutter при удалении соседней надписи
+            # переносит её анимацию на эту, и цифра прыгает в чужое место
+            key=f"fx{self.fx_seq}",
             left=x - 80, top=y - size, width=160, alignment=CENTER,
             content=ft.Text(text, size=size, weight=HEAVY, color=color, no_wrap=True),
             animate_position=ft.Animation(duration=700, curve=ft.AnimationCurve.EASE_OUT),
@@ -931,7 +1259,7 @@ class MineApp:
             self.floaters -= 1
 
     def on_blocks_broken(self, n: int):
-        if self.active:  # в простое без анимаций — бережём батарею
+        if self.active and not self.arena_on:  # в простое без анимаций — бережём батарею
             self.float_text(self.mine_w / 2, self.mine_h / 2 - 90, f"+{n} м", TEXT, 16)
         b = E.biome_at(self.game.depth)
         if self.shown_biome is not None and b.name != self.shown_biome:
@@ -939,6 +1267,8 @@ class MineApp:
             self.buzz("heavy_impact")
 
     def show_nugget(self):
+        if self.arena_on:
+            return
         w, h = max(self.mine_w, 120), max(self.mine_h, 120)
         self.nugget.left = random.uniform(12, w - 88)
         self.nugget.top = random.uniform(40, h - 88)
@@ -975,9 +1305,10 @@ class MineApp:
             self.toast_box.update()
 
     def show_offline(self, rep: E.OfflineReport, force: bool = False):
-        if not force and (rep.seconds < MIN_OFFLINE_REPORT or rep.gold <= 0):
+        if not force and (rep.seconds < MIN_OFFLINE_REPORT or (rep.gold <= 0 and not rep.shards)):
             return
         fx = self.game.effects()
+        shards = f"\n\n🪓 Пройденные волны похода принесли {fmt(rep.shards)} 💠." if rep.shards else ""
         stuck = (
             f"\n\n😈 Бригада упёрлась в стража «{E.guardian_at(self.game.depth).name}» — "
             "дальше без тебя не пройти, но золото с него капало."
@@ -987,7 +1318,7 @@ class MineApp:
             title=ft.Text("С возвращением! ⛏"),
             content=ft.Text(
                 f"Пока тебя не было {fmt_duration(rep.seconds)}, бригада накопала "
-                f"{fmt(rep.gold)} 🪙 и прошла {rep.meters} м.{stuck}\n\n"
+                f"{fmt(rep.gold)} 🪙 и прошла {rep.meters} м.{stuck}{shards}\n\n"
                 f"Офлайн-доход: {int(fx.offline_eff * 100)}%, максимум {fx.offline_cap / 3600:g} ч."
             ),
             actions=[ft.FilledButton(content="Забрать", on_click=lambda e: self.page.pop_dialog())],
@@ -1001,6 +1332,7 @@ class MineApp:
 
     def refresh_hud(self):
         g = self.game
+        self.sync_arena()
         self.gold_text.value = fmt(g.gold)
         auto = g.effects().autotap
         self.income_text.value = (
@@ -1009,7 +1341,16 @@ class MineApp:
         self.depth_text.value = f"{g.depth} м"
         b = E.biome_at(g.depth)
         self.biome_text.value = f"{b.emoji} {b.name} · золото {mult_str(E.biome_gold_mult(g.depth))}"
+        speed = SPEEDS[self.speed_idx]
+        self.speed_chip.visible = self.tester and speed != 1 and not self.arena_on
+        self.speed_chip.content.value = f"⏩ ×{speed}"
+        if self.arena_on:
+            self.refresh_arena()
+        else:
+            self.refresh_mine(b)
 
+    def refresh_mine(self, b: C.Biome):
+        g = self.game
         if b.name != self.shown_biome:
             self.shown_biome = b.name
             self.mine.gradient = ft.LinearGradient(
@@ -1043,7 +1384,7 @@ class MineApp:
         self.hp_bar.visible = not g.at_bottom
         if g.at_bottom:
             self.hp_text.value = f"Дно шахты · {E.MINE_DEPTH} м"
-            self.next_text.value = "Скоро здесь будет новое ✨"
+            self.next_text.value = "Открыт поход — вкладка «Поход» 🪓"
         else:
             full = E.block_max_hp(g.depth)
             self.hp_bar.value = max(0.0, min(1.0, g.block_hp / full))
@@ -1057,9 +1398,66 @@ class MineApp:
             self.fever_chip.content.value = f"🔥 Лихорадка ×{int(E.FEVER_MULT)} · {int(g.fever_until - g.time) + 1} с"
         if not g.nugget_active:
             self.nugget.visible = False
-        speed = SPEEDS[self.speed_idx]
-        self.speed_chip.visible = self.tester and speed != 1
-        self.speed_chip.content.value = f"⏩ ×{speed}"
+
+    def refresh_arena(self):
+        b = self.game.battle
+        world, mob = C.WORLDS[b.world], b.current_mob
+        if b.world != self.shown_world:
+            self.shown_world = b.world
+            self.mine.gradient = ft.LinearGradient(
+                begin=ft.Alignment.TOP_CENTER, end=ft.Alignment.BOTTOM_CENTER, colors=[world.bg_top, world.bg_bottom]
+            )
+        self.wave_text.value = (
+            f"{world.emoji} {world.name} · волна {b.wave % B.WAVES + 1}/{B.WAVES} · моб {b.mob + 1}/{B.MOBS}"
+        )
+        last = b.mob >= B.MOBS - 1
+        boss = last and B.is_boss_wave(b.wave)
+        windup = b.windup
+        self.mob_emoji.value = mob.emoji
+        self.mob_label.value = "👑 БОСС" if boss else "⭐ ЭЛИТНЫЙ" if last else ""
+        self.mob_label.color = "#fca5a5" if boss else GOLD
+        danger = windup and not b.blocking
+        self.mob_box.border = ft.Border.all(
+            5 if danger else 3, DANGER if danger else GOLD if last else alpha("#ffffff", 0.12)
+        )
+        self.mob_name.value = mob.name
+        full = B.mob_max_hp(b.wave, b.mob)
+        self.mob_hp_bar.value = max(0.0, min(1.0, b.mob_hp / full))
+        self.mob_hp_text.value = f"{fmt(max(b.mob_hp, 0.0))} / {fmt(full)} HP"
+
+        if b.waiting:
+            self.atk_bar.value = 0
+            text, color = "Тапни по мобу, чтобы начать бой", alpha(TEXT, 0.7)
+        else:
+            self.atk_bar.value = max(0.0, min(1.0, 1 - b.time_to_attack / mob.speed))
+            if b.blocking:
+                text, color = "✋ Блок поставлен", BLOCK
+            elif windup:
+                text, color = "❗ Замах — жми «Блок»!", DANGER
+            else:
+                text, color = "моб готовит удар", MUTED
+            self.atk_bar.color = color
+        self.atk_text.value, self.atk_text.color = text, color
+
+        combo = b.combo_now
+        self.combo_chip.visible = combo > 1
+        self.combo_chip.content.value = (
+            f"🔥 Комбо ×{B.combo_mult(combo):.1f}" + (" МАКС" if combo >= B.COMBO_CAP else "")
+        )
+        self.shard_chip.content.value = f"💠 {fmt(b.shards)}"
+        hp, max_hp = max(b.hero_hp, 0.0), b.max_hp()
+        self.hero_text.value = f"💚 {fmt(hp)} / {fmt(max_hp)}"
+        self.hero_bar.value = max(0.0, min(1.0, hp / max_hp))
+        self.hero_bar.color = DANGER if hp < max_hp * 0.3 else HEALTH
+        if b.blocking:
+            label, bg, fg = "✋ ГОТОВ", BLOCK, "#04121a"
+        elif not b.block_ready:
+            label, bg, fg = "✋ РАНО", CARD, MUTED
+        elif windup:
+            label, bg, fg = "✋ БЛОК!", DANGER, "#ffffff"
+        else:
+            label, bg, fg = "✋ БЛОК", CARD_HI, TEXT
+        self.block_text.value, self.block_text.color, self.block_btn.bgcolor = label, fg, bg
 
     def digger_visible(self, i: int) -> bool:
         g = self.game
@@ -1076,10 +1474,12 @@ class MineApp:
         relic_dot = g.can_prestige() or any(
             not g.perk_maxed(p.id) and g.perk_price(p.id) <= g.relics for p in C.PERKS
         )
-        for i, dot in enumerate((pick_dot, crew_dot, relic_dot)):
+        b = g.battle
+        battle_dot = g.battle_unlocked and any(b.upgrade_price(s) <= b.shards for s in B.SLOTS)
+        for i, dot in enumerate((pick_dot, crew_dot, relic_dot, battle_dot)):
             self.tab_dots[i].visible = dot and self.tab != i
 
-        [self.refresh_pick, self.refresh_crew, self.refresh_relics, self.refresh_more][self.tab]()
+        [self.refresh_pick, self.refresh_crew, self.refresh_relics, self.refresh_battle, self.refresh_more][self.tab]()
 
     def refresh_pick(self):
         g = self.game
@@ -1203,9 +1603,79 @@ class MineApp:
             self.pr_gain.value = f"Откроется на {E.PRESTIGE_MIN_DEPTH} м (осталось {left} м)"
             self.pr_btn.set("недоступно", f"{E.PRESTIGE_MIN_DEPTH} м", False)
 
+    def refresh_battle(self):
+        g, b = self.game, self.game.battle
+        unlocked = g.battle_unlocked
+        self.battle_lock.visible = not unlocked
+        for view in (self.world_card, self.hero_card, self.battle_help, *[r.view for r in self.gear_rows.values()]):
+            view.visible = unlocked
+        if not unlocked:
+            self.battle_lock.content.value = (
+                f"🔒 Поход откроется на дне шахты — на {E.MINE_DEPTH} м. Сейчас рекорд: {g.stats.max_depth} м.\n\n"
+                "Там ждут мобы, с которых падают осколки и доспехи: 4 мира по 10 волн. "
+                "Шахта при этом продолжит работать сама."
+            )
+            return
+
+        world = C.WORLDS[b.world]
+        power = B.wave_power(b.wave)
+        self.world_title.value = f"{world.emoji} {world.name} · волна {b.wave % B.WAVES + 1}/{B.WAVES}"
+        tier = b.world + 1
+        gear_hint = (
+            f"С десятого моба изредка падает вещь ранга {tier} — {world.gear} комплект"
+            if any(t < tier for t in b.tiers.values()) else "Комплект этого мира собран — вещи превращаются в осколки"
+        )
+        self.world_info.value = (
+            f"Мобы: около {fmt(B.MOB_HP * power)} HP, удар {fmt(B.MOB_ATK * power)}\n"
+            f"Осколки: {B.shard_value(b.wave)} 💠 с моба (шанс {B.SHARD_CHANCE:.0%}), с десятого — ×{B.ELITE_SHARDS}\n"
+            f"{gear_hint}"
+        )
+        for i, chip in enumerate(self.world_chips):
+            chip.opacity = 1 if i * B.WAVES <= b.frontier else 0.35
+            chip.bgcolor = alpha(SHARD, 0.3) if i == b.world else CARD_HI
+        first = b.world * B.WAVES
+        for i, chip in enumerate(self.wave_chips):
+            wave = first + i
+            selected, done = wave == b.wave, wave < b.cleared
+            chip.opacity = 1 if wave <= b.frontier else 0.35
+            chip.bgcolor = SHARD if selected else alpha(SHARD, 0.2) if done else CARD_HI
+            chip.content.color = "#04121a" if selected else TEXT
+            chip.content.value = f"{i + 1} 👑" if i == B.WAVES - 1 else str(i + 1)
+
+        rate = b.passive_rate() * 3600
+        self.hero_stats.value = "\n".join([
+            f"Урон {fmt(b.attack())}, с комбо — до ×{B.combo_mult(B.COMBO_CAP):g} · здоровье {fmt(b.max_hp())}",
+            f"Осколки: {fmt(b.shards)} 💠"
+            + (f" · пройденные волны сами приносят {fmt(rate)} 💠/ч, даже когда игра закрыта" if rate else ""),
+            f"Вещи дают шахте +{b.mine_bonus():.0%} урона · достижения дают герою +{len(g.achievements)}% урона",
+        ])
+
+        per_level = f"+{B.LEVEL_GROWTH - 1:.0%} за уровень"
+        for slot in C.GEAR:
+            row = self.gear_rows[slot.id]
+            rank, level = b.tiers[slot.id], b.levels[slot.id]
+            row.title.value = slot.names[rank] + (f" · +{level}" if level else "")
+            if slot.stat == "atk":
+                row.info.value = f"Урон героя: {fmt(b.attack())} · {per_level}"
+            else:
+                row.info.value = f"Здоровье: +{fmt(B.HERO_HP * b.power(slot.id) / len(B.ARMOR))} · {per_level}"
+            row.set_progress(rank / B.MAX_TIER, f"ранг {rank}/{B.MAX_TIER}")
+            if level >= B.LEVEL_CAP:
+                row.btn.set("вещь", "МАКС", False)
+                continue
+            n = min(self.buy_mode, B.LEVEL_CAP - level) if self.buy_mode else max(1, b.upgrade_max(slot.id))
+            cost = b.upgrade_price(slot.id, n)
+            row.btn.set(f"+{n} ур.", f"{fmt(cost)} 💠", cost <= b.shards)
+
     def refresh_more(self):
         g = self.game
         s = g.stats
+        bs = g.battle.stats
+        battle_lines = [
+            f"Поход: волн пройдено {g.battle.cleared}/{B.TOTAL_WAVES} · мобов побеждено: {fmt(bs.kills)}",
+            f"Отбито ударов: {fmt(bs.blocks)} · пропущено: {fmt(bs.hits_taken)} · поражений: {bs.deaths}",
+            f"Лучшее комбо: {bs.best_combo} · осколков добыто: {fmt(bs.shards_total)}",
+        ] if g.battle_unlocked else []
         self.stats_text.value = "\n".join([
             f"Рекорд глубины: {s.max_depth} м",
             f"Добыто золота всего: {fmt(s.gold_total)}",
@@ -1217,6 +1687,7 @@ class MineApp:
             f"Реликвий добыто: {s.relics_total}",
             f"Время в игре: {fmt_duration(s.play_time)}",
             f"Урон бригады: {fmt(g.dps())}/с · множитель урона ×{g.damage_mult():.2f}",
+            *battle_lines,
         ])
 
         if len(g.achievements) != self.shown_ach:
@@ -1236,7 +1707,8 @@ class MineApp:
                 f"tick={self.tick_ms:.1f} мс · floaters={self.floaters}\n"
                 f"сейв: {len(self._save_blob()) / 1024:.1f} КБ, {saved}\n"
                 f"game.time={g.time:.0f} с · след. самородок через {max(0, g.next_nugget_at - g.time):.0f} с\n"
-                f"block_hp={g.block_hp:.4g} · dps={g.dps():.4g} · tap={g.tap_damage():.4g}"
+                f"block_hp={g.block_hp:.4g} · dps={g.dps():.4g} · tap={g.tap_damage():.4g}\n"
+                f"поход: волна {g.battle.wave} · без вещи {g.battle.pity} · бой {g.battle.t:.0f} с"
             )
 
 

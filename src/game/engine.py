@@ -4,7 +4,7 @@
   * урон (тапы + бригада) пробивает блоки; каждый блок = 1 метр глубины;
   * каждая единица урона приносит золото по курсу текущего слоя (глубже — дороже);
   * шахта — 10 слоёв по 25 м, в конце каждого страж: 30 с на победу, иначе он восстанавливается;
-  * на 250 м дно — дальше копать некуда (там появится новый режим);
+  * на 250 м дно — дальше копать некуда, зато открывается поход (см. battle.py);
   * копателей каждого вида — не больше 500, множители растут по лестнице ×2/×5/×25/×125;
   * перерождение сбрасывает забег, но даёт реликвии — их тратят на артефакты реликвария.
 """
@@ -16,8 +16,10 @@ import random
 from dataclasses import asdict, dataclass, field, fields
 
 from . import content as C
+from .battle import Battle
+from .costs import geometric_cost, max_affordable
 
-SAVE_VERSION = 3
+SAVE_VERSION = 4
 
 MINE_DEPTH = 250              # дно шахты
 LAYER_DEPTH = 25              # 10 слоёв по 25 м
@@ -140,29 +142,6 @@ def perk_cost(perk_id: str, level: int) -> int:
     return math.ceil(p.base_cost * p.cost_growth**level)
 
 
-def geometric_cost(base: float, growth: float, owned: int, n: int) -> float:
-    """Цена n штук подряд, если уже куплено owned."""
-    if n <= 0:
-        return 0.0
-    try:
-        return base * growth**owned * (growth**n - 1) / (growth - 1)
-    except OverflowError:
-        return math.inf
-
-
-def max_affordable(base: float, growth: float, owned: int, gold: float) -> int:
-    first = geometric_cost(base, growth, owned, 1)
-    if gold < first:
-        return 0
-    n = int(math.log(gold * (growth - 1) / first + 1) / math.log(growth))
-    # поправка на погрешность float
-    while n > 0 and geometric_cost(base, growth, owned, n) > gold:
-        n -= 1
-    while geometric_cost(base, growth, owned, n + 1) <= gold:
-        n += 1
-    return n
-
-
 def relics_for_depth(depth: int) -> int:
     if depth < PRESTIGE_MIN_DEPTH:
         return 0
@@ -270,6 +249,7 @@ class OfflineReport:
     gold: float
     meters: int
     stuck_at_guardian: bool = False
+    shards: int = 0                   # осколки с пройденных волн похода
 
 
 @dataclass
@@ -291,11 +271,14 @@ class Game:
     next_nugget_at: float = FIRST_NUGGET_AT
     guardian_left: float = 0.0        # секунд до восстановления стража
     autotap_acc: float = 0.0
+    battle: Battle = field(default_factory=Battle)
     rng: random.Random = field(default_factory=random.Random, repr=False, compare=False)
 
     def __post_init__(self):
         self._fx_key = None
         self._fx = Effects()
+        self.battle.rng = self.rng
+        self._sync_battle()
         if self.block_hp <= 0:
             self.block_hp = block_max_hp(self.depth)
         if is_guardian(self.depth) and self.guardian_left <= 0:
@@ -340,18 +323,21 @@ class Game:
         fx.relic_mult += PERK_ARCHEO * p("archeo")
         return fx
 
-    def damage_mult(self) -> float:
-        return (1 + PERK_POWER * self.perk("power")) * (1 + ACHIEVEMENT_BONUS * len(self.achievements))
+    def achievement_mult(self) -> float:
+        return 1 + ACHIEVEMENT_BONUS * len(self.achievements)
 
-    def digger_dps_each(self, did: str, fx: Effects | None = None) -> float:
+    def damage_mult(self) -> float:
+        return (1 + PERK_POWER * self.perk("power")) * self.achievement_mult() * (1 + self.battle.mine_bonus())
+
+    def digger_dps_each(self, did: str, fx: Effects | None = None, dm: float | None = None) -> float:
         fx = fx or self.effects()
         d = C.DIGGERS_BY_ID[did]
         n = self.diggers.get(did, 0)
-        return d.base_dps * milestone_mult(n) * fx.digger_mult * self.damage_mult()
+        return d.base_dps * milestone_mult(n) * fx.digger_mult * (self.damage_mult() if dm is None else dm)
 
     def dps(self) -> float:
-        fx = self.effects()
-        return sum(n * self.digger_dps_each(did, fx) for did, n in self.diggers.items() if n > 0)
+        fx, dm = self.effects(), self.damage_mult()
+        return sum(n * self.digger_dps_each(did, fx, dm) for did, n in self.diggers.items() if n > 0)
 
     def tap_damage(self) -> float:
         fx = self.effects()
@@ -387,6 +373,11 @@ class Game:
     @property
     def at_bottom(self) -> bool:
         return self.depth >= MINE_DEPTH
+
+    @property
+    def battle_unlocked(self) -> bool:
+        """Поход открывается, когда шахта пройдена до дна, и остаётся открытым после перерождений."""
+        return self.stats.max_depth >= MINE_DEPTH
 
     def gold_rate(self, depth: int | None = None) -> float:
         """Сколько золота даёт 1 единица урона на этой глубине."""
@@ -519,6 +510,7 @@ class Game:
             self.nugget_until = self.time + fx.nugget_life
             rep.nugget_spawned = True
 
+        self.battle.idle(dt)  # пройденные волны похода понемногу приносят осколки
         rep.new_achievements = self.check_achievements()
         return rep
 
@@ -647,7 +639,24 @@ class Game:
             if a.id not in self.achievements and a.check(self):
                 self.achievements.add(a.id)
                 new.append(a)
+        if new:
+            self._sync_battle()
         return new
+
+    # ── поход ──
+
+    def _sync_battle(self) -> None:
+        """Достижения усиливают и героя похода — тем же +1% за каждое."""
+        self.battle.hero_bonus = self.achievement_mult()
+
+    def battle_hit(self):
+        rep = self.battle.hit()
+        if rep.killed:
+            rep.new_achievements = self.check_achievements()
+        return rep
+
+    def battle_upgrade(self, slot: str, n: int = 1) -> bool:
+        return self.battle.upgrade(slot, n)
 
     # ── перерождение ──
 
@@ -703,7 +712,8 @@ class Game:
         gold, _ = self._apply_damage(offline_dps * seconds, offline_dps=offline_dps)
         if self.at_guardian:
             self.guardian_left = fx.guardian_time
-        return OfflineReport(seconds, gold, self.depth - depth_before, self.at_guardian)
+        shards = self.battle.idle(seconds)
+        return OfflineReport(seconds, gold, self.depth - depth_before, self.at_guardian, shards)
 
     # ── сохранение ──
 
@@ -727,6 +737,7 @@ class Game:
             "next_nugget_at": self.next_nugget_at,
             "guardian_left": self.guardian_left,
             "autotap_acc": self.autotap_acc,
+            "battle": self.battle.to_dict(),
         }
 
     @classmethod
@@ -745,6 +756,7 @@ class Game:
             return {k: v for k, v in parsed.items() if v > 0}
 
         g = cls(rng=rng or random.Random())
+        g.battle = Battle.from_dict(data.get("battle"), g.rng)  # до v4 похода не было — будет пустой
         g.gold = float(num("gold"))
         g.depth = min(int(num("depth", 0)), MINE_DEPTH)  # v2: шахта была бесконечной
         g.max_depth_run = max(int(num("max_depth_run", 0)), g.depth)
@@ -792,4 +804,5 @@ class Game:
         g.guardian_left = min(left, guardian_time) if g.at_guardian and left > 0 else (
             guardian_time if g.at_guardian else 0.0
         )
+        g._sync_battle()
         return g

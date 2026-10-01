@@ -71,6 +71,38 @@ class Achievement:
     check: Callable = field(compare=False, repr=False)
 
 
+@dataclass(frozen=True)
+class Mob:
+    """Моб похода. hp и atk — множители к «норме» волны, speed — секунд между ударами."""
+    name: str
+    emoji: str
+    hp: float = 1.0
+    atk: float = 1.0
+    speed: float = 3.0
+
+
+@dataclass(frozen=True)
+class World:
+    """Мир похода: 10 волн по 10 мобов. Девять обычных, десятый — элитный, в последней волне — босс."""
+    name: str
+    emoji: str
+    gear: str              # какой комплект тут выпадает — для подсказок
+    bg_top: str
+    bg_bottom: str
+    windup: float          # за сколько секунд до удара моб замахивается (окно для блока)
+    mobs: tuple
+    elite: Mob
+    boss: Mob
+
+
+@dataclass(frozen=True)
+class GearSlot:
+    id: str
+    emoji: str
+    stat: str              # "atk" — оружие, "hp" — доспех
+    names: tuple           # название вещи по рангам: 0 — стартовая, 1…4 — из миров
+
+
 DIGGERS: list[Digger] = [
     Digger("hamster", "Хомяк-копатель", "🐹", 15, 0.1, "Роет лапками. Медленно, но с душой."),
     Digger("gnome", "Гном-шахтёр", "🧔", 100, 1, "Работает за еду и песни."),
@@ -159,9 +191,51 @@ PERKS_BY_ID = {p.id: p for p in PERKS}
 
 DIGGER_CAP = 500               # больше 500 одного вида нанять нельзя
 
+# ───────────────────────── поход (открывается на дне шахты) ─────────────────────────
+
+WAVES_PER_WORLD = 10
+COMBO_CAP = 20                 # столько ударов подряд разгоняют комбо до максимума
+
+WORLDS: list[World] = [
+    World("Пещеры", "🦇", "кожаный", "#10141a", "#2a3340", 1.0,
+          (Mob("Летучая мышь", "🦇", 0.85, 0.8, 2.4), Mob("Зомби", "🧟", 1.15, 1.2, 3.6),
+           Mob("Скелет", "💀", 1.0, 1.0, 3.0), Mob("Крыса", "🐀", 0.9, 0.9, 2.7)),
+          Mob("Огр", "👹", 3.0, 1.4, 3.4), Mob("Пещерный медведь", "🐻", 5.0, 1.5, 3.2)),
+    World("Крепость", "🏰", "железный", "#14121c", "#3a3350", 0.9,
+          (Mob("Призрак", "👻", 0.85, 0.9, 2.5), Mob("Вампир", "🧛", 1.0, 1.1, 3.0),
+           Mob("Варг", "🐺", 0.95, 1.0, 2.6), Mob("Колдун", "🧙", 0.9, 1.25, 3.6)),
+          Mob("Каменный голем", "🗿", 3.2, 1.4, 3.6), Mob("Тёмный лорд", "🦹", 5.0, 1.5, 3.0)),
+    World("Пекло", "🌋", "огненный", "#1c0a06", "#5a1a0c", 0.8,
+          (Mob("Бес", "👿", 0.85, 0.9, 2.3), Mob("Огневик", "🔥", 1.0, 1.15, 3.0),
+           Mob("Адский кабан", "🐗", 1.15, 1.1, 3.3), Mob("Костяк", "🦴", 0.95, 1.0, 2.8)),
+          Mob("Демон", "👺", 3.0, 1.5, 3.2), Mob("Огненный змей", "🐲", 5.4, 1.5, 2.9)),
+    World("Пустота", "🌌", "звёздный", "#07061a", "#241a52", 0.7,
+          (Mob("Пожиратель", "👾", 1.0, 1.0, 2.8), Mob("Странник", "👽", 0.9, 1.2, 3.3),
+           Mob("Кальмар пустоты", "🦑", 1.15, 1.0, 3.0), Mob("Тень", "🌑", 0.85, 0.9, 2.2)),
+          Mob("Страж пустоты", "🛸", 3.2, 1.5, 3.0), Mob("Дракон пустоты", "🐉", 5.7, 1.5, 2.8)),
+]
+
+GEAR: list[GearSlot] = [
+    GearSlot("weapon", "🪓", "atk",
+             ("Ржавый топор", "Каменный топор", "Железный топор", "Огненный топор", "Звёздный топор")),
+    GearSlot("helmet", "🪖", "hp",
+             ("Шахтёрская каска", "Кожаный шлем", "Железный шлем", "Огненный шлем", "Звёздный шлем")),
+    GearSlot("chest", "👕", "hp",
+             ("Рабочая роба", "Кожаная куртка", "Железная кираса", "Огненная кираса", "Звёздная кираса")),
+    GearSlot("legs", "👖", "hp",
+             ("Рабочие штаны", "Кожаные поножи", "Железные поножи", "Огненные поножи", "Звёздные поножи")),
+    GearSlot("boots", "🥾", "hp",
+             ("Стоптанные сапоги", "Кожаные сапоги", "Железные сапоги", "Огненные сапоги", "Звёздные сапоги")),
+]
+GEAR_BY_ID = {s.id: s for s in GEAR}
+
 
 def _total_diggers(g) -> int:
     return sum(g.diggers.values())
+
+
+def _world_cleared(n: int) -> Callable:
+    return lambda g: g.battle.cleared >= n * WAVES_PER_WORLD
 
 
 ACHIEVEMENTS: list[Achievement] = [
@@ -198,5 +272,17 @@ ACHIEVEMENTS: list[Achievement] = [
     Achievement("perk_1", "Коллекционер", "🔮", "Купить артефакт за реликвии", lambda g: sum(g.perks.values()) >= 1),
     Achievement("perk_all", "Полный реликварий", "🔑", "Хотя бы по уровню каждого артефакта",
                 lambda g: all(g.perks.get(p.id, 0) > 0 for p in PERKS)),
+    # поход
+    Achievement("mob_1", "Первая добыча", "🧟", "Победить моба в походе", lambda g: g.battle.stats.kills >= 1),
+    Achievement("mob_1k", "Истребитель", "🔪", "Победить 1 000 мобов", lambda g: g.battle.stats.kills >= 1_000),
+    Achievement("combo_max", "В ударе", "🥊", f"Разогнать комбо до {COMBO_CAP} ударов",
+                lambda g: g.battle.stats.best_combo >= COMBO_CAP),
+    Achievement("block_100", "Стена", "✋", "Отбить 100 ударов блоком", lambda g: g.battle.stats.blocks >= 100),
+    Achievement("gear_set", "При параде", "🎽", "Собрать полный комплект из первого мира или лучше",
+                lambda g: min(g.battle.tiers.values()) >= 1),
+    Achievement("world_1", "Хозяин пещер", "🐻", "Пройти мир «Пещеры»", _world_cleared(1)),
+    Achievement("world_2", "Взятие крепости", "🏰", "Пройти мир «Крепость»", _world_cleared(2)),
+    Achievement("world_3", "Огнеупорный", "🌋", "Пройти мир «Пекло»", _world_cleared(3)),
+    Achievement("world_4", "Повелитель пустоты", "🌌", "Пройти мир «Пустота»", _world_cleared(4)),
 ]
 ACHIEVEMENTS_BY_ID = {a.id: a for a in ACHIEVEMENTS}
